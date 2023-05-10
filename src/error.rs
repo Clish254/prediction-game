@@ -57,6 +57,9 @@ pub enum ContractError {
     #[error("You have already claimed your win from the privided round")]
     WinAlreadyClaimed {},
 
+    #[error("Fees for this round have already been claimed")]
+    FeesAlreadyClaimed {},
+
     #[error("You cannot claim win from the provided round because you lost")]
     YouLost {},
 }

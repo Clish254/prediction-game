@@ -58,23 +58,14 @@ pub struct Round {
 // string here is the name of the round
 pub const ROUND: Map<String, Round> = Map::new("round");
 
-// this stores round participant
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
-pub struct RoundParticipant {
-    pub joined_at: u64,
-    pub win_claimed: bool,
-}
-
-// addr here is the address of the user who is participating in the round
-// String is the name of the round
-pub const ROUNDPARTICIPANT: Map<(String, Addr), RoundParticipant> = Map::new("roundparticipant");
-
 // this stores a user's bet amount and side in a given round
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct Bet {
     pub side: Side,
     pub amount: u128,
     pub denom: String,
+    pub win_claimed: bool,
+    pub placed_at: u64,
 }
 
 // string here is the name of the round the user is betting on

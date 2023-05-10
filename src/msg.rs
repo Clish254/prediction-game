@@ -17,11 +17,12 @@ pub struct InstantiateMsg {
 pub enum ExecuteMsg {
     UpdateAdmins { admins: Vec<String> },
     CreateRound { start_time: u64, name: String },
-    JoinRound { name: String },
     PlaceBet { side: Side, round_name: String },
     StartRound { name: String },
     StopRound { name: String },
     ClaimWin { round_name: String },
+    ClaimRoundFees { round_name: String },
+    UpdateTreasuryAddr { new_address: String },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
