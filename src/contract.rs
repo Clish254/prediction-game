@@ -256,12 +256,10 @@ pub fn execute_place_bet(
                         Side::Up => {
                             updated_round.up_bets_count += 1;
                             updated_round.total_up_bet_amount += sent_amount;
-                            updated_round.total_bet_amount += sent_amount;
                         }
                         Side::Down => {
                             updated_round.down_bets_count += 1;
                             updated_round.total_down_bet_amount += sent_amount;
-                            updated_round.total_bet_amount += sent_amount;
                         }
                     }
                     let existing_round_denom_bet = ROUNDDENOMBET
@@ -287,6 +285,9 @@ pub fn execute_place_bet(
                             )?;
                         }
                     }
+
+                    updated_round.total_bet_amount += sent_amount;
+                    updated_round.participants_count += 1;
                     ROUND.save(deps.storage, round_name, &updated_round)?;
                 }
             }
