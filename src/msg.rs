@@ -18,6 +18,8 @@ pub enum ExecuteMsg {
     UpdateAdmins { admins: Vec<String> },
     CreateRound { start_time: u64, name: String },
     PlaceBet { side: Side, round_name: String },
+    EditBet { side: Side, round_name: String },
+    WithdrawBet { round_name: String },
     StartRound { name: String },
     StopRound { name: String },
     ClaimWin { round_name: String },

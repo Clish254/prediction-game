@@ -54,6 +54,9 @@ pub enum ContractError {
     #[error("You have no bet in the provided round")]
     BetNotFound {},
 
+    #[error("Can't edit bet to set the same side as the existing one")]
+    DuplicateBetSide {},
+
     #[error("You have already claimed your win from the privided round")]
     WinAlreadyClaimed {},
 

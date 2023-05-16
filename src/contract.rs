@@ -59,6 +59,10 @@ pub fn execute(
         ExecuteMsg::PlaceBet { side, round_name } => {
             execute_place_bet(deps, info, env, side, round_name)
         }
+        ExecuteMsg::EditBet { side, round_name } => {
+            execute_edit_bet(deps, info, env, side, round_name)
+        }
+        ExecuteMsg::WithdrawBet { round_name } => execute_withdraw_bet(deps, info, env, round_name),
         ExecuteMsg::StartRound { name } => execute_start_round(deps, info, env, name),
         ExecuteMsg::StopRound { name } => execute_stop_round(deps, info, env, name),
         ExecuteMsg::ClaimWin { round_name } => execute_claim_win(deps, info, env, round_name),
@@ -297,6 +301,79 @@ pub fn execute_place_bet(
     Ok(Response::new().add_attribute("action", "place bet"))
 }
 
+pub fn execute_edit_bet(
+    deps: DepsMut<KujiraQuery>,
+    info: MessageInfo,
+    env: Env,
+    side: Side,
+    round_name: String,
+) -> Result<Response<BankMsg>, ContractError> {
+    let existing_round = ROUND.may_load(deps.storage, round_name.clone())?;
+    match existing_round {
+        Some(round) => {
+            let current_time = env.block.time.seconds();
+            if round.start_time < current_time || round.is_started {
+                return Err(ContractError::RoundAlreadyStarted {});
+            }
+            let existing_bet =
+                BET.may_load(deps.storage, (round_name.clone(), info.sender.clone()))?;
+
+            match existing_bet {
+                Some(bet) => {
+                    let mut updated_bet = bet.clone();
+                    if bet.side == side {
+                        return Err(ContractError::DuplicateBetSide {});
+                    }
+                    updated_bet.side = side;
+                    BET.save(deps.storage, (round_name, info.sender), &updated_bet)?
+                }
+                None => return Err(ContractError::BetNotFound {}),
+            }
+        }
+        None => return Err(ContractError::RoundDoesNotExist {}),
+    }
+    Ok(Response::new().add_attribute("action", "edit bet"))
+}
+
+pub fn execute_withdraw_bet(
+    deps: DepsMut<KujiraQuery>,
+    info: MessageInfo,
+    env: Env,
+    round_name: String,
+) -> Result<Response<BankMsg>, ContractError> {
+    let existing_round = ROUND.may_load(deps.storage, round_name.clone())?;
+    let withdraw_message: CosmosMsg<BankMsg>;
+    match existing_round {
+        Some(round) => {
+            let current_time = env.block.time.seconds();
+            if round.start_time < current_time || round.is_started {
+                return Err(ContractError::RoundAlreadyStarted {});
+            }
+            let existing_bet =
+                BET.may_load(deps.storage, (round_name.clone(), info.sender.clone()))?;
+
+            match existing_bet {
+                Some(bet) => {
+                    let bet_coin = Coin {
+                        denom: bet.denom.clone(),
+                        amount: Uint128::from(bet.amount),
+                    };
+
+                    withdraw_message = CosmosMsg::Bank(BankMsg::Send {
+                        to_address: info.sender.to_string(),
+                        amount: vec![bet_coin],
+                    });
+                }
+                None => return Err(ContractError::BetNotFound {}),
+            }
+        }
+        None => return Err(ContractError::RoundDoesNotExist {}),
+    }
+    Ok(Response::new()
+        .add_attribute("action", "withdraw bet")
+        .add_message(withdraw_message))
+}
+
 // enables an admin to stop a round that is due based on the stop_time
 // name here is the unique name of the round to be stopped
 pub fn execute_stop_round(
@@ -355,17 +432,19 @@ pub fn execute_claim_win(
 
             let existing_bet =
                 BET.may_load(deps.storage, (round_name.clone(), info.sender.clone()))?;
+            let start_price = round.start_price.unwrap();
+            let stop_price = round.stop_price.unwrap();
             match existing_bet {
                 Some(bet) => {
                     let mut is_winner = false;
                     match bet.side {
                         Side::Up => {
-                            if round.stop_price > round.start_price {
+                            if stop_price > start_price {
                                 is_winner = true
                             }
                         }
                         Side::Down => {
-                            if round.stop_price < round.start_price {
+                            if stop_price < start_price {
                                 is_winner = true
                             }
                         }
@@ -446,6 +525,17 @@ pub fn execute_claim_win(
                         let mut updated_round = round;
                         updated_round.fees_claimed = true;
                         ROUND.save(deps.storage, round_name, &updated_round)?;
+                    } else if start_price == stop_price {
+                        let sender_coin = Coin {
+                            denom: bet.denom.clone(),
+                            amount: Uint128::from(bet.amount),
+                        };
+                        sender_coins.push(sender_coin);
+                        let prices_equal_msg: CosmosMsg<BankMsg> = CosmosMsg::Bank(BankMsg::Send {
+                            to_address: info.sender.to_string(),
+                            amount: sender_coins,
+                        });
+                        messages.push(prices_equal_msg)
                     } else {
                         return Err(ContractError::YouLost {});
                     }
