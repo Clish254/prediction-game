@@ -7,7 +7,9 @@ use cosmwasm_std::{
 use cw2::set_contract_version;
 
 use crate::error::ContractError;
-use crate::msg::{AllRoundsResponse, ExecuteMsg, InstantiateMsg, QueryMsg};
+use crate::msg::{
+    AllRoundsResponse, ExecuteMsg, InstantiateMsg, QueryMsg, RoundResponse, UserBetResponse,
+};
 use crate::state::{Bet, Config, Round, RoundDenomBet, Side, BET, CONFIG, ROUND, ROUNDDENOMBET};
 use kujira::querier::KujiraQuerier;
 use kujira::query::KujiraQuery;
@@ -53,6 +55,12 @@ pub fn execute(
 ) -> Result<Response<BankMsg>, ContractError> {
     match msg {
         ExecuteMsg::UpdateAdmins { admins } => execute_update_admins(deps, info, admins),
+        ExecuteMsg::UpdateAssetDenom { asset_denom } => {
+            execute_update_asset_denom(deps, info, asset_denom)
+        }
+        ExecuteMsg::UpdateAcceptedBetDenoms {
+            accepted_bet_denoms,
+        } => execute_update_accepted_bet_denoms(deps, info, accepted_bet_denoms),
         ExecuteMsg::CreateRound { start_time, name } => {
             execute_create_round(deps, info, env, start_time, name)
         }
@@ -90,6 +98,38 @@ pub fn execute_update_admins(
     config.admins = admins;
     CONFIG.save(deps.storage, &config)?;
     Ok(Response::new().add_attribute("action", "update admins"))
+}
+
+// updates the asset which users can bet on in the contract
+pub fn execute_update_asset_denom(
+    deps: DepsMut<KujiraQuery>,
+    info: MessageInfo,
+    asset_denom: String,
+) -> Result<Response<BankMsg>, ContractError> {
+    let is_admin = sender_is_admin(&deps, &info.sender.as_str())?;
+    if !is_admin {
+        return Err(ContractError::Unauthorized {});
+    }
+    let mut config = CONFIG.load(deps.storage)?;
+    config.asset_denom = asset_denom;
+    CONFIG.save(deps.storage, &config)?;
+    Ok(Response::new().add_attribute("action", "update asset denom"))
+}
+
+// updates the list of denoms accepted when betting
+pub fn execute_update_accepted_bet_denoms(
+    deps: DepsMut<KujiraQuery>,
+    info: MessageInfo,
+    accepted_bet_denoms: Vec<String>,
+) -> Result<Response<BankMsg>, ContractError> {
+    let is_admin = sender_is_admin(&deps, &info.sender.as_str())?;
+    if !is_admin {
+        return Err(ContractError::Unauthorized {});
+    }
+    let mut config = CONFIG.load(deps.storage)?;
+    config.accepted_bet_denoms = accepted_bet_denoms;
+    CONFIG.save(deps.storage, &config)?;
+    Ok(Response::new().add_attribute("action", "update accepted bet denoms"))
 }
 
 // updates the treasury address which recieves fees from a round
@@ -604,15 +644,38 @@ pub fn execute_claim_round_fees(
 pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
         QueryMsg::GetRounds {} => query_all_rounds(deps, env),
+        QueryMsg::GetRound { round_name } => query_round(deps, env, round_name),
+        QueryMsg::GetUserBet {
+            round_name,
+            user_addr,
+        } => query_user_bet(deps, env, round_name, user_addr),
     }
 }
 
+// gets all rounds created in the smart contract
 pub fn query_all_rounds(deps: Deps, _env: Env) -> StdResult<Binary> {
     let rounds = ROUND
         .range(deps.storage, None, None, Order::Ascending)
         .map(|p| Ok(p?.1))
         .collect::<StdResult<Vec<_>>>()?;
     to_binary(&AllRoundsResponse { rounds })
+}
+
+pub fn query_round(deps: Deps, _env: Env, round_name: String) -> StdResult<Binary> {
+    let round = ROUND.may_load(deps.storage, round_name)?;
+    to_binary(&RoundResponse { round })
+}
+
+// gets bets placed by a given user in a given round
+pub fn query_user_bet(
+    deps: Deps,
+    _env: Env,
+    round_name: String,
+    user_addr: String,
+) -> StdResult<Binary> {
+    let validated_user_addr = deps.api.addr_validate(&user_addr)?;
+    let bet = BET.may_load(deps.storage, (round_name, validated_user_addr))?;
+    to_binary(&UserBetResponse { bet })
 }
 
 #[cfg(test)]
