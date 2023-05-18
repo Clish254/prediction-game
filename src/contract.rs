@@ -164,7 +164,6 @@ pub fn execute_create_round(
                 total_bet_amount: 0,
                 total_up_bet_amount: 0,
                 total_down_bet_amount: 0,
-                total_withdrawn_amount: 0,
                 is_started: false,
                 started_at: None,
                 is_stopped: false,
@@ -172,7 +171,6 @@ pub fn execute_create_round(
                 start_price: None,
                 stop_price: None,
                 bet_denoms: Vec::new(),
-                fees_claimed: false,
             };
             ROUND.save(deps.storage, name, &new_round)?;
         }
@@ -549,9 +547,6 @@ pub fn execute_claim_win(
                             (round_name.clone(), info.sender),
                             &updated_bet,
                         )?;
-                        let mut updated_round = round;
-                        updated_round.fees_claimed = true;
-                        ROUND.save(deps.storage, round_name, &updated_round)?;
                     } else if start_price == stop_price {
                         let sender_coin = Coin {
                             denom: bet.denom.clone(),

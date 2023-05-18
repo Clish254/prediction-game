@@ -47,10 +47,8 @@ pub struct Round {
     pub total_bet_amount: u128,
     pub total_up_bet_amount: u128,
     pub total_down_bet_amount: u128,
-    pub total_withdrawn_amount: u128,
     pub start_price: Option<Decimal>,
     pub stop_price: Option<Decimal>,
-    pub fees_claimed: bool,
 }
 
 // string here is the name of the round
