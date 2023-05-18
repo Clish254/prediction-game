@@ -65,4 +65,10 @@ pub enum ContractError {
 
     #[error("You cannot claim win from the provided round because you lost")]
     YouLost {},
+
+    #[error("There is insufficient balance in treasury pool to withdraw the required amount")]
+    InsufficientTreasuryDenomBalance {},
+
+    #[error("The provided denom does not exist in the treasury pool")]
+    TreasuryDenomDoesNotExist {},
 }

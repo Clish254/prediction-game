@@ -81,3 +81,13 @@ pub struct RoundDenomBet {
 // first string here is the name of the round the user is betting on
 // second string is the denom used to bet in the round
 pub const ROUNDDENOMBET: Map<(String, String), RoundDenomBet> = Map::new("rounddenombet");
+
+// this is stores the total amount of a given denom that has been collected in fees and is
+// yet to be withdrawn
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+pub struct TreasuryPoolDenom {
+    pub amount: u128,
+}
+
+// string here is the address of the denom availabe in the treasury balance
+pub const TREASURYPOOLDENOM: Map<String, TreasuryPoolDenom> = Map::new("rounddenombet");
