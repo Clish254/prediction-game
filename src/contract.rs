@@ -29,11 +29,9 @@ pub fn instantiate(
     msg: InstantiateMsg,
 ) -> Result<Response, ContractError> {
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
-    let validated_treasury_addr = deps.api.addr_validate(&msg.treasury_addr)?;
     let config = Config {
         admins: map_validate(deps.api, &msg.admins)?,
         asset_denom: msg.asset_denom,
-        treasury_addr: validated_treasury_addr,
         accepted_bet_denoms: msg.accepted_bet_denoms,
     };
     CONFIG.save(deps.storage, &config)?;
@@ -80,9 +78,6 @@ pub fn execute(
             denom,
             amount,
         } => execute_withdraw_from_treasury_pool(deps, info, env, denom, to_address, amount),
-        ExecuteMsg::UpdateTreasuryAddr { new_address } => {
-            execute_update_treasury_address(deps, info, new_address)
-        }
     }
 }
 
@@ -133,23 +128,6 @@ pub fn execute_update_accepted_bet_denoms(
     config.accepted_bet_denoms = accepted_bet_denoms;
     CONFIG.save(deps.storage, &config)?;
     Ok(Response::new().add_attribute("action", "update accepted bet denoms"))
-}
-
-// updates the treasury address which recieves fees from a round
-pub fn execute_update_treasury_address(
-    deps: DepsMut<KujiraQuery>,
-    info: MessageInfo,
-    new_address: String,
-) -> Result<Response<BankMsg>, ContractError> {
-    let is_admin = sender_is_admin(&deps, &info.sender.as_str())?;
-    if !is_admin {
-        return Err(ContractError::Unauthorized {});
-    }
-    let mut config = CONFIG.load(deps.storage)?;
-    let new_addr = deps.api.addr_validate(&new_address)?;
-    config.treasury_addr = new_addr;
-    CONFIG.save(deps.storage, &config)?;
-    Ok(Response::new().add_attribute("action", "update treasury address"))
 }
 
 // creates a round that users can bet on, start_time is the time when the round should start and

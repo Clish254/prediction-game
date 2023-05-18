@@ -12,8 +12,6 @@ pub struct Config {
     pub asset_denom: String,
     // denoms that users are allowed to bet with
     pub accepted_bet_denoms: Vec<String>,
-    // address where fees will be sent
-    pub treasury_addr: Addr,
 }
 
 impl Config {

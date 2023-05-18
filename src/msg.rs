@@ -43,9 +43,6 @@ pub enum ExecuteMsg {
         denom: String,
         amount: u128,
     },
-    UpdateTreasuryAddr {
-        new_address: String,
-    },
     UpdateAcceptedBetDenoms {
         accepted_bet_denoms: Vec<String>,
     },
