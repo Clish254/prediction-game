@@ -8,7 +8,6 @@ use crate::state::{Bet, Round, Side, TreasuryPoolDenom};
 pub struct InstantiateMsg {
     pub admins: Vec<String>,
     pub asset_denom: String,
-    pub treasury_addr: String,
     pub accepted_bet_denoms: Vec<String>,
 }
 
