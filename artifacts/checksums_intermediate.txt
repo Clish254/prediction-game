@@ -1,0 +1,1 @@
+91e65083d8e24d6d28f605c464619746cbb64ae3da1526189d52e32a7dd1bab6  ./target/wasm32-unknown-unknown/release/prediction_game.wasm
