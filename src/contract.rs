@@ -54,7 +54,7 @@ pub fn execute(
     env: Env,
     info: MessageInfo,
     msg: ExecuteMsg,
-) -> Result<Response<BankMsg>, ContractError> {
+) -> Result<Response, ContractError> {
     match msg {
         ExecuteMsg::UpdateAdmins { admins } => execute_update_admins(deps, info, admins),
         ExecuteMsg::UpdateAssetDenom { asset_denom } => {
@@ -86,7 +86,7 @@ pub fn execute_update_admins(
     deps: DepsMut<KujiraQuery>,
     info: MessageInfo,
     admins: Vec<String>,
-) -> Result<Response<BankMsg>, ContractError> {
+) -> Result<Response, ContractError> {
     let is_admin = sender_is_admin(&deps, &info.sender.as_str())?;
     if !is_admin {
         return Err(ContractError::Unauthorized {});
@@ -103,7 +103,7 @@ pub fn execute_update_asset_denom(
     deps: DepsMut<KujiraQuery>,
     info: MessageInfo,
     asset_denom: String,
-) -> Result<Response<BankMsg>, ContractError> {
+) -> Result<Response, ContractError> {
     let is_admin = sender_is_admin(&deps, &info.sender.as_str())?;
     if !is_admin {
         return Err(ContractError::Unauthorized {});
@@ -119,7 +119,7 @@ pub fn execute_update_accepted_bet_denoms(
     deps: DepsMut<KujiraQuery>,
     info: MessageInfo,
     accepted_bet_denoms: Vec<String>,
-) -> Result<Response<BankMsg>, ContractError> {
+) -> Result<Response, ContractError> {
     let is_admin = sender_is_admin(&deps, &info.sender.as_str())?;
     if !is_admin {
         return Err(ContractError::Unauthorized {});
@@ -138,7 +138,7 @@ pub fn execute_create_round(
     env: Env,
     start_time: u64,
     name: String,
-) -> Result<Response<BankMsg>, ContractError> {
+) -> Result<Response, ContractError> {
     let current_time = env.block.time.seconds();
     let in_five_mins = current_time + 300;
     if start_time < in_five_mins {
@@ -185,7 +185,7 @@ pub fn execute_start_round(
     info: MessageInfo,
     env: Env,
     name: String,
-) -> Result<Response<BankMsg>, ContractError> {
+) -> Result<Response, ContractError> {
     let is_admin = sender_is_admin(&deps, &info.sender.as_str())?;
     if !is_admin {
         return Err(ContractError::Unauthorized {});
@@ -223,7 +223,7 @@ pub fn execute_place_bet(
     env: Env,
     side: Side,
     round_name: String,
-) -> Result<Response<BankMsg>, ContractError> {
+) -> Result<Response, ContractError> {
     let config = CONFIG.load(deps.storage)?;
     let funds_len = info.funds.len();
 
@@ -325,9 +325,9 @@ pub fn execute_withdraw_bet(
     info: MessageInfo,
     env: Env,
     round_name: String,
-) -> Result<Response<BankMsg>, ContractError> {
+) -> Result<Response, ContractError> {
     let existing_round = ROUND.may_load(deps.storage, round_name.clone())?;
-    let withdraw_message: CosmosMsg<BankMsg>;
+    let withdraw_message: CosmosMsg;
     match existing_round {
         Some(round) => {
             let current_time = env.block.time.seconds();
@@ -397,7 +397,7 @@ pub fn execute_stop_round(
     info: MessageInfo,
     env: Env,
     name: String,
-) -> Result<Response<BankMsg>, ContractError> {
+) -> Result<Response, ContractError> {
     let is_admin = sender_is_admin(&deps, &info.sender.as_str())?;
     if !is_admin {
         return Err(ContractError::Unauthorized {});
@@ -469,9 +469,9 @@ pub fn execute_claim_win(
     info: MessageInfo,
     env: Env,
     round_name: String,
-) -> Result<Response<BankMsg>, ContractError> {
+) -> Result<Response, ContractError> {
     let existing_round = ROUND.may_load(deps.storage, round_name.clone())?;
-    let mut messages: Vec<CosmosMsg<BankMsg>> = Vec::new();
+    let mut messages: Vec<CosmosMsg> = Vec::new();
     match existing_round {
         Some(round) => {
             let current_time = env.block.time.seconds();
@@ -534,7 +534,7 @@ pub fn execute_claim_win(
                             }
                         }
 
-                        let sender_wins_msg: CosmosMsg<BankMsg> = CosmosMsg::Bank(BankMsg::Send {
+                        let sender_wins_msg = CosmosMsg::Bank(BankMsg::Send {
                             to_address: info.sender.to_string(),
                             amount: sender_coins,
                         });
@@ -553,7 +553,7 @@ pub fn execute_claim_win(
                             amount: Uint128::from(bet.amount),
                         };
                         sender_coins.push(sender_coin);
-                        let prices_equal_msg: CosmosMsg<BankMsg> = CosmosMsg::Bank(BankMsg::Send {
+                        let prices_equal_msg = CosmosMsg::Bank(BankMsg::Send {
                             to_address: info.sender.to_string(),
                             amount: sender_coins,
                         });
@@ -580,13 +580,13 @@ pub fn execute_withdraw_from_treasury_pool(
     denom: String,
     to_address: String,
     amount: u128,
-) -> Result<Response<BankMsg>, ContractError> {
+) -> Result<Response, ContractError> {
     let is_admin = sender_is_admin(&deps, &info.sender.as_str())?;
     if !is_admin {
         return Err(ContractError::Unauthorized {});
     }
     let existing_treasury_pool_denom = TREASURYPOOLDENOM.may_load(deps.storage, denom.clone())?;
-    let message: CosmosMsg<BankMsg>;
+    let message: CosmosMsg;
     match existing_treasury_pool_denom {
         Some(treasury_pool_denom) => {
             if treasury_pool_denom.amount < amount {
