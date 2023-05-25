@@ -23,7 +23,7 @@ const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn instantiate(
-    deps: DepsMut,
+    deps: DepsMut<KujiraQuery>,
     _env: Env,
     _info: MessageInfo,
     msg: InstantiateMsg,
@@ -467,15 +467,14 @@ pub fn execute_stop_round(
 pub fn execute_claim_win(
     deps: DepsMut<KujiraQuery>,
     info: MessageInfo,
-    env: Env,
+    _env: Env,
     round_name: String,
 ) -> Result<Response, ContractError> {
     let existing_round = ROUND.may_load(deps.storage, round_name.clone())?;
     let mut messages: Vec<CosmosMsg> = Vec::new();
     match existing_round {
         Some(round) => {
-            let current_time = env.block.time.seconds();
-            if current_time > round.stop_time || !round.is_stopped {
+            if !round.is_stopped {
                 return Err(ContractError::RoundStillInProgress {});
             }
 
@@ -609,7 +608,7 @@ pub fn execute_withdraw_from_treasury_pool(
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
-pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
+pub fn query(deps: Deps<KujiraQuery>, env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
         QueryMsg::GetRounds {} => query_all_rounds(deps, env),
         QueryMsg::GetRound { round_name } => query_round(deps, env, round_name),
@@ -622,7 +621,7 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
 }
 
 // gets all rounds created in the smart contract
-pub fn query_all_rounds(deps: Deps, _env: Env) -> StdResult<Binary> {
+pub fn query_all_rounds(deps: Deps<KujiraQuery>, _env: Env) -> StdResult<Binary> {
     let rounds = ROUND
         .range(deps.storage, None, None, Order::Ascending)
         .map(|p| Ok(p?.1))
@@ -631,7 +630,7 @@ pub fn query_all_rounds(deps: Deps, _env: Env) -> StdResult<Binary> {
 }
 
 // gets all rounds created in the smart contract
-pub fn query_all_treasury_pool_denoms(deps: Deps, _env: Env) -> StdResult<Binary> {
+pub fn query_all_treasury_pool_denoms(deps: Deps<KujiraQuery>, _env: Env) -> StdResult<Binary> {
     let treasury_pool_denoms = TREASURYPOOLDENOM
         .range(deps.storage, None, None, Order::Ascending)
         .map(|p| Ok(p?.1))
@@ -642,14 +641,14 @@ pub fn query_all_treasury_pool_denoms(deps: Deps, _env: Env) -> StdResult<Binary
 }
 
 // gets single round by name
-pub fn query_round(deps: Deps, _env: Env, round_name: String) -> StdResult<Binary> {
+pub fn query_round(deps: Deps<KujiraQuery>, _env: Env, round_name: String) -> StdResult<Binary> {
     let round = ROUND.may_load(deps.storage, round_name)?;
     to_binary(&RoundResponse { round })
 }
 
 // gets bets placed by a given user in a given round
 pub fn query_user_bet(
-    deps: Deps,
+    deps: Deps<KujiraQuery>,
     _env: Env,
     round_name: String,
     user_addr: String,
@@ -662,24 +661,73 @@ pub fn query_user_bet(
 #[cfg(test)]
 mod tests {
 
-    use crate::contract::instantiate;
-    use crate::msg::InstantiateMsg;
-    use cosmwasm_std::attr;
-    use cosmwasm_std::testing::{mock_dependencies, mock_env, mock_info};
+    use crate::contract::{execute, instantiate};
+    use crate::msg::{ExecuteMsg, InstantiateMsg};
+    use crate::state::Side;
+    use crate::ContractError;
+    use core::cell::RefCell;
+    use core::marker::PhantomData;
+    use cosmwasm_std::testing::{mock_env, mock_info, MockApi, MockQuerier, MockStorage};
+    use cosmwasm_std::{
+        attr, to_binary, Coin, ContractResult, Decimal, OwnedDeps, SystemResult, Timestamp, Uint128,
+    };
+    use kujira::query::{ExchangeRateResponse, KujiraQuery, OracleQuery};
+    use std::collections::HashMap;
+
+    use std::str::FromStr;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     pub const ADMIN1: &str = "addr1";
     pub const ADMIN2: &str = "addr2";
+    pub const ANYONE: &str = "anyone";
 
-    pub const TREASURY1: &str = "treasury1";
+    pub const USER1: &str = "user1";
+
+    pub const TREASURY: &str = "treasury1";
 
     pub const ASSETDENOM: &str = "asset1";
+    pub const ASSETDENOM2: &str = "asset2";
 
     pub const DENOM1: &str = "denom1";
     pub const DENOM2: &str = "denom2";
+    pub const DENOM3: &str = "denom3";
+
+    thread_local! {
+        static PRICES: RefCell<HashMap<String, Decimal>> = RefCell::new(HashMap::new());
+    }
+
+    type OwnedDepsType = OwnedDeps<MockStorage, MockApi, MockQuerier<KujiraQuery>, KujiraQuery>;
+
+    pub fn mock_dependencies_kujira() -> OwnedDepsType {
+        let querier = MockQuerier::new(&[]).with_custom_handler(|query| match query {
+            // KujiraQuery::Oracle(OracleQuery::ExchangeRate { denom }) => {
+            //     let price = PRICES.with(|p| *p.borrow().get(denom.as_str()).unwrap());
+            //     SystemResult::Ok(ContractResult::Ok(
+            //         to_binary(&ExchangeRateResponse { rate: price }).unwrap(),
+            //     ))
+            // }
+            KujiraQuery::Oracle(OracleQuery::ExchangeRate { denom: _ }) => {
+                let exchange_rate_response = ExchangeRateResponse {
+                    rate: Decimal::from_str("1.23").unwrap(),
+                };
+                SystemResult::Ok(ContractResult::Ok(
+                    to_binary(&exchange_rate_response).unwrap(),
+                ))
+            }
+            _ => panic!("Unexpected query: {query:?}"),
+        });
+
+        OwnedDeps {
+            storage: MockStorage::default(),
+            api: MockApi::default(),
+            querier,
+            custom_query_type: PhantomData,
+        }
+    }
 
     #[test]
     fn test_instantiate() {
-        let mut deps = mock_dependencies();
+        let mut deps = mock_dependencies_kujira();
         let env = mock_env();
         let info = mock_info(ADMIN1, &vec![]);
 
@@ -687,10 +735,715 @@ mod tests {
             admins: vec![ADMIN1.to_string(), ADMIN2.to_string()],
             asset_denom: ASSETDENOM.to_string(),
             accepted_bet_denoms: vec![String::from(DENOM1), String::from(DENOM2)],
-            treasury_addr: TREASURY1.to_string(),
         };
 
         let res = instantiate(deps.as_mut(), env, info, msg).unwrap();
         assert_eq!(res.attributes, vec![attr("action", "instantiate")])
+    }
+
+    #[test]
+    fn test_execute_update_admins() {
+        let mut deps = mock_dependencies_kujira();
+        let env = mock_env();
+        let info = mock_info(ADMIN1, &vec![]);
+
+        let msg = InstantiateMsg {
+            admins: vec![ADMIN1.to_string(), ADMIN2.to_string()],
+            asset_denom: ASSETDENOM.to_string(),
+            accepted_bet_denoms: vec![String::from(DENOM1), String::from(DENOM2)],
+        };
+
+        let _res = instantiate(deps.as_mut(), env, info.clone(), msg).unwrap();
+
+        //
+        let msg = ExecuteMsg::UpdateAdmins {
+            admins: vec![ADMIN1.to_string(), ADMIN2.to_string(), ANYONE.to_string()],
+        };
+        let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+        assert_eq!(res.attributes, vec![attr("action", "update admins")])
+    }
+
+    #[test]
+    fn test_execute_update_asset_denom() {
+        let mut deps = mock_dependencies_kujira();
+        let env = mock_env();
+        let info = mock_info(ADMIN1, &vec![]);
+
+        let msg = InstantiateMsg {
+            admins: vec![ADMIN1.to_string(), ADMIN2.to_string()],
+            asset_denom: ASSETDENOM.to_string(),
+            accepted_bet_denoms: vec![String::from(DENOM1), String::from(DENOM2)],
+        };
+
+        let _res = instantiate(deps.as_mut(), env, info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::UpdateAssetDenom {
+            asset_denom: ASSETDENOM2.to_string(),
+        };
+        let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+        assert_eq!(res.attributes, vec![attr("action", "update asset denom")])
+    }
+
+    #[test]
+    fn test_execute_update_accepted_bet_denom() {
+        let mut deps = mock_dependencies_kujira();
+        let env = mock_env();
+        let info = mock_info(ADMIN1, &vec![]);
+
+        let msg = InstantiateMsg {
+            admins: vec![ADMIN1.to_string(), ADMIN2.to_string()],
+            asset_denom: ASSETDENOM.to_string(),
+            accepted_bet_denoms: vec![String::from(DENOM1), String::from(DENOM2)],
+        };
+
+        let _res = instantiate(deps.as_mut(), env, info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::UpdateAcceptedBetDenoms {
+            accepted_bet_denoms: vec![
+                String::from(DENOM1),
+                String::from(DENOM2),
+                String::from(DENOM3),
+            ],
+        };
+        let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+        assert_eq!(
+            res.attributes,
+            vec![attr("action", "update accepted bet denoms")]
+        )
+    }
+
+    #[test]
+    fn test_execute_create_round() {
+        let mut deps = mock_dependencies_kujira();
+        let env = mock_env();
+        let info = mock_info(ADMIN1, &vec![]);
+
+        let msg = InstantiateMsg {
+            admins: vec![ADMIN1.to_string(), ADMIN2.to_string()],
+            asset_denom: ASSETDENOM.to_string(),
+            accepted_bet_denoms: vec![String::from(DENOM1), String::from(DENOM2)],
+        };
+
+        let _res = instantiate(deps.as_mut(), env, info.clone(), msg).unwrap();
+
+        let current_time = SystemTime::now();
+        let unix_timestamp = current_time
+            .duration_since(UNIX_EPOCH)
+            .expect("Failed to get UNIX timestamp")
+            .as_secs();
+
+        let six_minutes = Duration::from_secs(6 * 60); // 6 minutes in seconds
+        let new_timestamp = unix_timestamp + six_minutes.as_secs();
+
+        let msg = ExecuteMsg::CreateRound {
+            start_time: new_timestamp,
+            name: "Round1".to_string(),
+        };
+        let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+        assert_eq!(res.attributes, vec![attr("action", "Create round")])
+    }
+
+    #[test]
+    fn test_execute_place_bet_with_accepted_denom() {
+        let mut deps = mock_dependencies_kujira();
+        let env = mock_env();
+        let info = mock_info(ADMIN1, &vec![]);
+
+        let msg = InstantiateMsg {
+            admins: vec![ADMIN1.to_string(), ADMIN2.to_string()],
+            asset_denom: ASSETDENOM.to_string(),
+            accepted_bet_denoms: vec![String::from(DENOM1), String::from(DENOM2)],
+        };
+
+        let _res = instantiate(deps.as_mut(), env, info.clone(), msg).unwrap();
+
+        let current_time = SystemTime::now();
+        let unix_timestamp = current_time
+            .duration_since(UNIX_EPOCH)
+            .expect("Failed to get UNIX timestamp")
+            .as_secs();
+
+        let six_minutes = Duration::from_secs(6 * 60); // 6 minutes in seconds
+        let new_timestamp = unix_timestamp + six_minutes.as_secs();
+
+        let msg = ExecuteMsg::CreateRound {
+            start_time: new_timestamp,
+            name: "Round1".to_string(),
+        };
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::PlaceBet {
+            side: Side::Up,
+            round_name: "Round1".to_string(),
+        };
+
+        let info = mock_info(
+            USER1,
+            &vec![Coin {
+                denom: DENOM1.to_string(),
+                amount: Uint128::from(1000u128),
+            }],
+        );
+
+        let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+        assert_eq!(res.attributes, vec![attr("action", "place bet")])
+    }
+
+    #[test]
+    fn test_execute_place_bet_with_unaccepted_denom() {
+        let mut deps = mock_dependencies_kujira();
+        let env = mock_env();
+        let info = mock_info(ADMIN1, &vec![]);
+
+        let msg = InstantiateMsg {
+            admins: vec![ADMIN1.to_string(), ADMIN2.to_string()],
+            asset_denom: ASSETDENOM.to_string(),
+            accepted_bet_denoms: vec![String::from(DENOM1), String::from(DENOM2)],
+        };
+
+        let _res = instantiate(deps.as_mut(), env, info.clone(), msg).unwrap();
+
+        let current_time = SystemTime::now();
+        let unix_timestamp = current_time
+            .duration_since(UNIX_EPOCH)
+            .expect("Failed to get UNIX timestamp")
+            .as_secs();
+
+        let six_minutes = Duration::from_secs(6 * 60); // 6 minutes in seconds
+        let new_timestamp = unix_timestamp + six_minutes.as_secs();
+
+        let msg = ExecuteMsg::CreateRound {
+            start_time: new_timestamp,
+            name: "Round1".to_string(),
+        };
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::PlaceBet {
+            side: Side::Up,
+            round_name: "Round1".to_string(),
+        };
+
+        let info = mock_info(
+            USER1,
+            &vec![Coin {
+                denom: "RANDOMDENOM".to_string(),
+                amount: Uint128::from(1000u128),
+            }],
+        );
+
+        let err = execute(deps.as_mut(), mock_env(), info, msg).unwrap_err();
+
+        assert!(matches!(err, ContractError::DenomNotSupported {}))
+    }
+
+    #[test]
+    fn test_execute_withdraw_bet() {
+        let mut deps = mock_dependencies_kujira();
+        let env = mock_env();
+        let info = mock_info(ADMIN1, &vec![]);
+
+        let msg = InstantiateMsg {
+            admins: vec![ADMIN1.to_string(), ADMIN2.to_string()],
+            asset_denom: ASSETDENOM.to_string(),
+            accepted_bet_denoms: vec![String::from(DENOM1), String::from(DENOM2)],
+        };
+
+        let _res = instantiate(deps.as_mut(), env, info.clone(), msg).unwrap();
+
+        let current_time = SystemTime::now();
+        let unix_timestamp = current_time
+            .duration_since(UNIX_EPOCH)
+            .expect("Failed to get UNIX timestamp")
+            .as_secs();
+
+        let six_minutes = Duration::from_secs(6 * 60); // 6 minutes in seconds
+        let new_timestamp = unix_timestamp + six_minutes.as_secs();
+
+        let msg = ExecuteMsg::CreateRound {
+            start_time: new_timestamp,
+            name: "Round1".to_string(),
+        };
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::PlaceBet {
+            side: Side::Up,
+            round_name: "Round1".to_string(),
+        };
+
+        let info = mock_info(
+            USER1,
+            &vec![Coin {
+                denom: DENOM1.to_string(),
+                amount: Uint128::from(1000u128),
+            }],
+        );
+
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::WithdrawBet {
+            round_name: "Round1".to_string(),
+        };
+
+        let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+        assert_eq!(res.attributes, vec![attr("action", "withdraw bet")])
+    }
+
+    #[test]
+    fn test_execute_start_round_as_admin() {
+        let mut deps = mock_dependencies_kujira();
+        let env = mock_env();
+        let info = mock_info(ADMIN1, &vec![]);
+
+        let msg = InstantiateMsg {
+            admins: vec![ADMIN1.to_string(), ADMIN2.to_string()],
+            asset_denom: ASSETDENOM.to_string(),
+            accepted_bet_denoms: vec![String::from(DENOM1), String::from(DENOM2)],
+        };
+
+        let _res = instantiate(deps.as_mut(), env, info.clone(), msg).unwrap();
+
+        let current_time = SystemTime::now();
+        let unix_timestamp = current_time
+            .duration_since(UNIX_EPOCH)
+            .expect("Failed to get UNIX timestamp")
+            .as_secs();
+
+        let six_minutes = Duration::from_secs(6 * 60); // 6 minutes in seconds
+        let new_timestamp = unix_timestamp + six_minutes.as_secs();
+
+        let msg = ExecuteMsg::CreateRound {
+            start_time: new_timestamp,
+            name: "Round1".to_string(),
+        };
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::PlaceBet {
+            side: Side::Up,
+            round_name: "Round1".to_string(),
+        };
+
+        let info = mock_info(
+            USER1,
+            &vec![Coin {
+                denom: DENOM1.to_string(),
+                amount: Uint128::from(1000u128),
+            }],
+        );
+
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::StartRound {
+            name: "Round1".to_string(),
+        };
+
+        let info = mock_info(ADMIN1, &vec![]);
+
+        let res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+        assert_eq!(res.attributes, vec![attr("action", "Start round")])
+    }
+
+    #[test]
+    fn test_execute_start_round_not_admin() {
+        let mut deps = mock_dependencies_kujira();
+        let env = mock_env();
+        let info = mock_info(ADMIN1, &vec![]);
+
+        let msg = InstantiateMsg {
+            admins: vec![ADMIN1.to_string(), ADMIN2.to_string()],
+            asset_denom: ASSETDENOM.to_string(),
+            accepted_bet_denoms: vec![String::from(DENOM1), String::from(DENOM2)],
+        };
+
+        let _res = instantiate(deps.as_mut(), env, info.clone(), msg).unwrap();
+
+        let current_time = SystemTime::now();
+        let unix_timestamp = current_time
+            .duration_since(UNIX_EPOCH)
+            .expect("Failed to get UNIX timestamp")
+            .as_secs();
+
+        let six_minutes = Duration::from_secs(6 * 60); // 6 minutes in seconds
+        let new_timestamp = unix_timestamp + six_minutes.as_secs();
+
+        let msg = ExecuteMsg::CreateRound {
+            start_time: new_timestamp,
+            name: "Round1".to_string(),
+        };
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::PlaceBet {
+            side: Side::Up,
+            round_name: "Round1".to_string(),
+        };
+
+        let info = mock_info(
+            USER1,
+            &vec![Coin {
+                denom: DENOM1.to_string(),
+                amount: Uint128::from(1000u128),
+            }],
+        );
+
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::StartRound {
+            name: "Round1".to_string(),
+        };
+
+        let err = execute(deps.as_mut(), mock_env(), info, msg).unwrap_err();
+
+        assert!(matches!(err, ContractError::Unauthorized {}))
+    }
+
+    #[test]
+    fn test_execute_stop_round_while_in_progress() {
+        let mut deps = mock_dependencies_kujira();
+        let env = mock_env();
+        let info = mock_info(ADMIN1, &vec![]);
+
+        let msg = InstantiateMsg {
+            admins: vec![ADMIN1.to_string(), ADMIN2.to_string()],
+            asset_denom: ASSETDENOM.to_string(),
+            accepted_bet_denoms: vec![String::from(DENOM1), String::from(DENOM2)],
+        };
+
+        let _res = instantiate(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
+
+        let current_time = SystemTime::now();
+        let unix_timestamp = current_time
+            .duration_since(UNIX_EPOCH)
+            .expect("Failed to get UNIX timestamp")
+            .as_secs();
+
+        let six_minutes = Duration::from_secs(6 * 60); // 6 minutes in seconds
+        let new_timestamp = unix_timestamp + six_minutes.as_secs();
+
+        let msg = ExecuteMsg::CreateRound {
+            start_time: new_timestamp,
+            name: "Round1".to_string(),
+        };
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::PlaceBet {
+            side: Side::Up,
+            round_name: "Round1".to_string(),
+        };
+
+        let info = mock_info(
+            USER1,
+            &vec![Coin {
+                denom: DENOM1.to_string(),
+                amount: Uint128::from(1000u128),
+            }],
+        );
+
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::StartRound {
+            name: "Round1".to_string(),
+        };
+
+        let info = mock_info(ADMIN1, &vec![]);
+
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::StopRound {
+            name: "Round1".to_string(),
+        };
+
+        let err = execute(deps.as_mut(), env, info.clone(), msg).unwrap_err();
+
+        assert!(matches!(err, ContractError::RoundStillInProgress {}))
+    }
+
+    #[test]
+    fn test_execute_stop_round() {
+        let mut deps = mock_dependencies_kujira();
+        let mut env = mock_env();
+        let info = mock_info(ADMIN1, &vec![]);
+
+        let msg = InstantiateMsg {
+            admins: vec![ADMIN1.to_string(), ADMIN2.to_string()],
+            asset_denom: ASSETDENOM.to_string(),
+            accepted_bet_denoms: vec![String::from(DENOM1), String::from(DENOM2)],
+        };
+
+        let _res = instantiate(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
+
+        let current_time = SystemTime::now();
+        let unix_timestamp = current_time
+            .duration_since(UNIX_EPOCH)
+            .expect("Failed to get UNIX timestamp")
+            .as_secs();
+
+        let six_minutes = Duration::from_secs(6 * 60); // 6 minutes in seconds
+        let new_timestamp = unix_timestamp + six_minutes.as_secs();
+
+        let msg = ExecuteMsg::CreateRound {
+            start_time: new_timestamp,
+            name: "Round1".to_string(),
+        };
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::PlaceBet {
+            side: Side::Up,
+            round_name: "Round1".to_string(),
+        };
+
+        let info = mock_info(
+            USER1,
+            &vec![Coin {
+                denom: DENOM1.to_string(),
+                amount: Uint128::from(1000u128),
+            }],
+        );
+
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::StartRound {
+            name: "Round1".to_string(),
+        };
+
+        let info = mock_info(ADMIN1, &vec![]);
+
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::StopRound {
+            name: "Round1".to_string(),
+        };
+
+        let twelve_minutes = Duration::from_secs(12 * 60); // 6 minutes in seconds
+        let stop_timestamp = unix_timestamp + twelve_minutes.as_secs();
+        env.block.time = Timestamp::from_seconds(stop_timestamp);
+
+        let res = execute(deps.as_mut(), env, info.clone(), msg).unwrap();
+
+        assert_eq!(res.attributes, vec![attr("action", "Stop round")])
+    }
+
+    #[test]
+    fn test_execute_claim_win_of_existing_bet() {
+        let mut deps = mock_dependencies_kujira();
+        let mut env = mock_env();
+        let info = mock_info(ADMIN1, &vec![]);
+
+        let msg = InstantiateMsg {
+            admins: vec![ADMIN1.to_string(), ADMIN2.to_string()],
+            asset_denom: ASSETDENOM.to_string(),
+            accepted_bet_denoms: vec![String::from(DENOM1), String::from(DENOM2)],
+        };
+
+        let _res = instantiate(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
+
+        let current_time = SystemTime::now();
+        let unix_timestamp = current_time
+            .duration_since(UNIX_EPOCH)
+            .expect("Failed to get UNIX timestamp")
+            .as_secs();
+
+        let six_minutes = Duration::from_secs(6 * 60); // 6 minutes in seconds
+        let new_timestamp = unix_timestamp + six_minutes.as_secs();
+
+        let msg = ExecuteMsg::CreateRound {
+            start_time: new_timestamp,
+            name: "Round1".to_string(),
+        };
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::PlaceBet {
+            side: Side::Up,
+            round_name: "Round1".to_string(),
+        };
+
+        let info = mock_info(
+            USER1,
+            &vec![Coin {
+                denom: DENOM1.to_string(),
+                amount: Uint128::from(1000u128),
+            }],
+        );
+
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::StartRound {
+            name: "Round1".to_string(),
+        };
+
+        let info = mock_info(ADMIN1, &vec![]);
+
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::StopRound {
+            name: "Round1".to_string(),
+        };
+
+        let twelve_minutes = Duration::from_secs(12 * 60); // 6 minutes in seconds
+        let stop_timestamp = unix_timestamp + twelve_minutes.as_secs();
+        env.block.time = Timestamp::from_seconds(stop_timestamp);
+
+        let _res = execute(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::ClaimWin {
+            round_name: "Round1".to_string(),
+        };
+
+        let info = mock_info(USER1, &vec![]);
+        let res = execute(deps.as_mut(), env, info.clone(), msg).unwrap();
+
+        assert_eq!(res.attributes, vec![attr("action", "claim win")])
+    }
+
+    #[test]
+    fn test_execute_claim_win_of_nonexisting_bet() {
+        let mut deps = mock_dependencies_kujira();
+        let mut env = mock_env();
+        let info = mock_info(ADMIN1, &vec![]);
+
+        let msg = InstantiateMsg {
+            admins: vec![ADMIN1.to_string(), ADMIN2.to_string()],
+            asset_denom: ASSETDENOM.to_string(),
+            accepted_bet_denoms: vec![String::from(DENOM1), String::from(DENOM2)],
+        };
+
+        let _res = instantiate(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
+
+        let current_time = SystemTime::now();
+        let unix_timestamp = current_time
+            .duration_since(UNIX_EPOCH)
+            .expect("Failed to get UNIX timestamp")
+            .as_secs();
+
+        let six_minutes = Duration::from_secs(6 * 60); // 6 minutes in seconds
+        let new_timestamp = unix_timestamp + six_minutes.as_secs();
+
+        let msg = ExecuteMsg::CreateRound {
+            start_time: new_timestamp,
+            name: "Round1".to_string(),
+        };
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::PlaceBet {
+            side: Side::Up,
+            round_name: "Round1".to_string(),
+        };
+
+        let info = mock_info(
+            USER1,
+            &vec![Coin {
+                denom: DENOM1.to_string(),
+                amount: Uint128::from(1000u128),
+            }],
+        );
+
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::StartRound {
+            name: "Round1".to_string(),
+        };
+
+        let info = mock_info(ADMIN1, &vec![]);
+
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::StopRound {
+            name: "Round1".to_string(),
+        };
+
+        let twelve_minutes = Duration::from_secs(12 * 60); // 6 minutes in seconds
+        let stop_timestamp = unix_timestamp + twelve_minutes.as_secs();
+        env.block.time = Timestamp::from_seconds(stop_timestamp);
+
+        let _res = execute(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::ClaimWin {
+            round_name: "Round1".to_string(),
+        };
+
+        let err = execute(deps.as_mut(), env, info.clone(), msg).unwrap_err();
+
+        assert!(matches!(err, ContractError::BetNotFound {}))
+    }
+
+    #[test]
+    fn test_execute_withdraw_from_treasury_pool() {
+        let mut deps = mock_dependencies_kujira();
+        let mut env = mock_env();
+        let info = mock_info(ADMIN1, &vec![]);
+
+        let msg = InstantiateMsg {
+            admins: vec![ADMIN1.to_string(), ADMIN2.to_string()],
+            asset_denom: ASSETDENOM.to_string(),
+            accepted_bet_denoms: vec![String::from(DENOM1), String::from(DENOM2)],
+        };
+
+        let _res = instantiate(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
+
+        let current_time = SystemTime::now();
+        let unix_timestamp = current_time
+            .duration_since(UNIX_EPOCH)
+            .expect("Failed to get UNIX timestamp")
+            .as_secs();
+
+        let six_minutes = Duration::from_secs(6 * 60); // 6 minutes in seconds
+        let new_timestamp = unix_timestamp + six_minutes.as_secs();
+
+        let msg = ExecuteMsg::CreateRound {
+            start_time: new_timestamp,
+            name: "Round1".to_string(),
+        };
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::PlaceBet {
+            side: Side::Up,
+            round_name: "Round1".to_string(),
+        };
+
+        let info = mock_info(
+            USER1,
+            &vec![Coin {
+                denom: DENOM1.to_string(),
+                amount: Uint128::from(1000u128),
+            }],
+        );
+
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::StartRound {
+            name: "Round1".to_string(),
+        };
+
+        let info = mock_info(ADMIN1, &vec![]);
+
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::StopRound {
+            name: "Round1".to_string(),
+        };
+
+        let twelve_minutes = Duration::from_secs(12 * 60); // 6 minutes in seconds
+        let stop_timestamp = unix_timestamp + twelve_minutes.as_secs();
+        env.block.time = Timestamp::from_seconds(stop_timestamp);
+
+        let _res = execute(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::WithdrawFromPool {
+            to_address: TREASURY.to_string(),
+            denom: DENOM1.to_string(),
+            amount: 1,
+        };
+
+        let res = execute(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
+
+        assert_eq!(
+            res.attributes,
+            vec![attr("action", "Withdraw from treasury pool")]
+        )
     }
 }
