@@ -421,38 +421,41 @@ pub fn execute_stop_round(
             stopped_round.stopped_at = Some(current_time);
             stopped_round.stop_price = Some(price);
             ROUND.save(deps.storage, name.clone(), &stopped_round)?;
-            // update the treasury pool amount for each denom used to bet in the round
-            for denom in round.bet_denoms.clone() {
-                let existing_round_denom_bet =
-                    ROUNDDENOMBET.may_load(deps.storage, (name.clone(), denom.clone()))?;
-                match existing_round_denom_bet {
-                    Some(round_denom_bet) => {
-                        let treasury_share = round_denom_bet.amount * 15 / 100;
-                        let existing_treasury_pool_denom =
-                            TREASURYPOOLDENOM.may_load(deps.storage, denom.clone())?;
-                        match existing_treasury_pool_denom {
-                            Some(treasury_pool_denom) => {
-                                let mut updated_treasury_pool_denom = treasury_pool_denom;
-                                updated_treasury_pool_denom.amount += treasury_share;
-                                TREASURYPOOLDENOM.save(
-                                    deps.storage,
-                                    denom,
-                                    &updated_treasury_pool_denom,
-                                )?;
-                            }
-                            None => {
-                                let new_treasury_pool_denom = TreasuryPoolDenom {
-                                    amount: treasury_share,
-                                };
-                                TREASURYPOOLDENOM.save(
-                                    deps.storage,
-                                    denom,
-                                    &new_treasury_pool_denom,
-                                )?
+            // if the price changed, take fees
+            if round.start_price.unwrap() != price {
+                // update the treasury pool amount for each denom used to bet in the round
+                for denom in round.bet_denoms.clone() {
+                    let existing_round_denom_bet =
+                        ROUNDDENOMBET.may_load(deps.storage, (name.clone(), denom.clone()))?;
+                    match existing_round_denom_bet {
+                        Some(round_denom_bet) => {
+                            let treasury_share = round_denom_bet.amount * 15 / 100;
+                            let existing_treasury_pool_denom =
+                                TREASURYPOOLDENOM.may_load(deps.storage, denom.clone())?;
+                            match existing_treasury_pool_denom {
+                                Some(treasury_pool_denom) => {
+                                    let mut updated_treasury_pool_denom = treasury_pool_denom;
+                                    updated_treasury_pool_denom.amount += treasury_share;
+                                    TREASURYPOOLDENOM.save(
+                                        deps.storage,
+                                        denom,
+                                        &updated_treasury_pool_denom,
+                                    )?;
+                                }
+                                None => {
+                                    let new_treasury_pool_denom = TreasuryPoolDenom {
+                                        amount: treasury_share,
+                                    };
+                                    TREASURYPOOLDENOM.save(
+                                        deps.storage,
+                                        denom,
+                                        &new_treasury_pool_denom,
+                                    )?
+                                }
                             }
                         }
+                        None => continue,
                     }
-                    None => continue,
                 }
             }
         }
@@ -1372,7 +1375,7 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_withdraw_from_treasury_pool() {
+    fn test_execute_withdraw_from_treasury_pool_when_there_are_no_fees() {
         let mut deps = mock_dependencies_kujira();
         let mut env = mock_env();
         let info = mock_info(ADMIN1, &vec![]);
@@ -1426,6 +1429,94 @@ mod tests {
         let msg = ExecuteMsg::StopRound {
             name: "Round1".to_string(),
         };
+
+        let twelve_minutes = Duration::from_secs(12 * 60); // 6 minutes in seconds
+        let stop_timestamp = unix_timestamp + twelve_minutes.as_secs();
+        env.block.time = Timestamp::from_seconds(stop_timestamp);
+
+        let _res = execute(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::WithdrawFromPool {
+            to_address: TREASURY.to_string(),
+            denom: DENOM1.to_string(),
+            amount: 1,
+        };
+
+        let err = execute(deps.as_mut(), env.clone(), info.clone(), msg).unwrap_err();
+
+        assert!(matches!(err, ContractError::TreasuryDenomDoesNotExist {}))
+    }
+
+    #[test]
+    fn test_execute_withdraw_from_treasury_pool_when_fees_exist() {
+        let mut deps = mock_dependencies_kujira();
+        let mut env = mock_env();
+        let info = mock_info(ADMIN1, &vec![]);
+
+        let msg = InstantiateMsg {
+            admins: vec![ADMIN1.to_string(), ADMIN2.to_string()],
+            asset_denom: ASSETDENOM.to_string(),
+            accepted_bet_denoms: vec![String::from(DENOM1), String::from(DENOM2)],
+        };
+
+        let _res = instantiate(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
+
+        let current_time = SystemTime::now();
+        let unix_timestamp = current_time
+            .duration_since(UNIX_EPOCH)
+            .expect("Failed to get UNIX timestamp")
+            .as_secs();
+
+        let six_minutes = Duration::from_secs(6 * 60); // 6 minutes in seconds
+        let new_timestamp = unix_timestamp + six_minutes.as_secs();
+
+        let msg = ExecuteMsg::CreateRound {
+            start_time: new_timestamp,
+            name: "Round1".to_string(),
+        };
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::PlaceBet {
+            side: Side::Up,
+            round_name: "Round1".to_string(),
+        };
+
+        let info = mock_info(
+            USER1,
+            &vec![Coin {
+                denom: DENOM1.to_string(),
+                amount: Uint128::from(1000u128),
+            }],
+        );
+
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::StartRound {
+            name: "Round1".to_string(),
+        };
+
+        let info = mock_info(ADMIN1, &vec![]);
+
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::StopRound {
+            name: "Round1".to_string(),
+        };
+
+        let mut querier: MockQuerier<KujiraQuery> = MockQuerier::new(&[]);
+        // update querier to have price change
+        querier = querier.with_custom_handler(|query: &KujiraQuery| match query {
+            KujiraQuery::Oracle(OracleQuery::ExchangeRate { denom: _ }) => {
+                let exchange_rate_response = ExchangeRateResponse {
+                    rate: Decimal::from_str("1.10").unwrap(),
+                };
+                SystemResult::Ok(ContractResult::Ok(
+                    to_binary(&exchange_rate_response).unwrap(),
+                ))
+            }
+            _ => unimplemented!(),
+        });
+        deps.querier = querier;
 
         let twelve_minutes = Duration::from_secs(12 * 60); // 6 minutes in seconds
         let stop_timestamp = unix_timestamp + twelve_minutes.as_secs();
