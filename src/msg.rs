@@ -54,7 +54,9 @@ pub enum ExecuteMsg {
 #[serde(rename_all = "snake_case")]
 pub enum QueryMsg {
     GetRounds {},
-    GetTreasuryPoolDenoms {},
+    GetTreasuryPoolDenom {
+        denom: String,
+    },
     GetRound {
         round_name: String,
     },
@@ -70,8 +72,8 @@ pub struct AllRoundsResponse {
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, JsonSchema, Debug)]
-pub struct AllTreasuryPoolDenomsResponse {
-    pub treasury_pool_denoms: Vec<TreasuryPoolDenom>,
+pub struct TreasuryPoolDenomResponse {
+    pub treasury_pool_denom: Option<TreasuryPoolDenom>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, JsonSchema, Debug)]

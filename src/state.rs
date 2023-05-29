@@ -83,6 +83,7 @@ pub const ROUNDDENOMBET: Map<(String, String), RoundDenomBet> = Map::new("roundd
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct TreasuryPoolDenom {
     pub amount: u128,
+    pub denom: String,
 }
 
 // string here is the address of the denom availabe in the treasury balance

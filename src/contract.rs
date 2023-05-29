@@ -8,8 +8,8 @@ use cw2::set_contract_version;
 
 use crate::error::ContractError;
 use crate::msg::{
-    AllRoundsResponse, AllTreasuryPoolDenomsResponse, ExecuteMsg, InstantiateMsg, QueryMsg,
-    RoundResponse, UserBetResponse,
+    AllRoundsResponse, ExecuteMsg, InstantiateMsg, QueryMsg, RoundResponse,
+    TreasuryPoolDenomResponse, UserBetResponse,
 };
 use crate::state::{
     Bet, Config, Round, RoundDenomBet, Side, TreasuryPoolDenom, BET, CONFIG, ROUND, ROUNDDENOMBET,
@@ -427,13 +427,18 @@ pub fn execute_stop_round(
                 for denom in round.bet_denoms.clone() {
                     let existing_round_denom_bet =
                         ROUNDDENOMBET.may_load(deps.storage, (name.clone(), denom.clone()))?;
+                    println!("denoms {:?}", denom.clone());
                     match existing_round_denom_bet {
                         Some(round_denom_bet) => {
                             let treasury_share = round_denom_bet.amount * 15 / 100;
+
+                            println!("{}", treasury_share);
                             let existing_treasury_pool_denom =
                                 TREASURYPOOLDENOM.may_load(deps.storage, denom.clone())?;
+                            println!("existing denom{:?}", existing_treasury_pool_denom.clone());
                             match existing_treasury_pool_denom {
                                 Some(treasury_pool_denom) => {
+                                    println!("existing {:?}", treasury_pool_denom.clone());
                                     let mut updated_treasury_pool_denom = treasury_pool_denom;
                                     updated_treasury_pool_denom.amount += treasury_share;
                                     TREASURYPOOLDENOM.save(
@@ -445,7 +450,10 @@ pub fn execute_stop_round(
                                 None => {
                                     let new_treasury_pool_denom = TreasuryPoolDenom {
                                         amount: treasury_share,
+                                        denom: denom.clone(),
                                     };
+
+                                    println!("new {:?}", new_treasury_pool_denom);
                                     TREASURYPOOLDENOM.save(
                                         deps.storage,
                                         denom,
@@ -615,7 +623,7 @@ pub fn query(deps: Deps<KujiraQuery>, env: Env, msg: QueryMsg) -> StdResult<Bina
     match msg {
         QueryMsg::GetRounds {} => query_all_rounds(deps, env),
         QueryMsg::GetRound { round_name } => query_round(deps, env, round_name),
-        QueryMsg::GetTreasuryPoolDenoms {} => query_all_treasury_pool_denoms(deps, env),
+        QueryMsg::GetTreasuryPoolDenom { denom } => query_treasury_pool_denom(deps, env, denom),
         QueryMsg::GetUserBet {
             round_name,
             user_addr,
@@ -632,14 +640,15 @@ pub fn query_all_rounds(deps: Deps<KujiraQuery>, _env: Env) -> StdResult<Binary>
     to_binary(&AllRoundsResponse { rounds })
 }
 
-// gets all rounds created in the smart contract
-pub fn query_all_treasury_pool_denoms(deps: Deps<KujiraQuery>, _env: Env) -> StdResult<Binary> {
-    let treasury_pool_denoms = TREASURYPOOLDENOM
-        .range(deps.storage, None, None, Order::Ascending)
-        .map(|p| Ok(p?.1))
-        .collect::<StdResult<Vec<_>>>()?;
-    to_binary(&AllTreasuryPoolDenomsResponse {
-        treasury_pool_denoms,
+// gets single treasury pool denom
+pub fn query_treasury_pool_denom(
+    deps: Deps<KujiraQuery>,
+    _env: Env,
+    denom: String,
+) -> StdResult<Binary> {
+    let treasury_pool_denom = TREASURYPOOLDENOM.may_load(deps.storage, denom)?;
+    to_binary(&TreasuryPoolDenomResponse {
+        treasury_pool_denom,
     })
 }
 
@@ -664,15 +673,19 @@ pub fn query_user_bet(
 #[cfg(test)]
 mod tests {
 
-    use crate::contract::{execute, instantiate};
-    use crate::msg::{ExecuteMsg, InstantiateMsg};
-    use crate::state::Side;
+    use crate::contract::{execute, instantiate, query};
+    use crate::msg::{
+        AllRoundsResponse, ExecuteMsg, InstantiateMsg, QueryMsg, RoundResponse,
+        TreasuryPoolDenomResponse, UserBetResponse,
+    };
+    use crate::state::{Bet, Round, Side, TreasuryPoolDenom};
     use crate::ContractError;
     use core::cell::RefCell;
     use core::marker::PhantomData;
     use cosmwasm_std::testing::{mock_env, mock_info, MockApi, MockQuerier, MockStorage};
     use cosmwasm_std::{
-        attr, to_binary, Coin, ContractResult, Decimal, OwnedDeps, SystemResult, Timestamp, Uint128,
+        attr, from_binary, to_binary, Coin, ContractResult, Decimal, OwnedDeps, SystemResult,
+        Timestamp, Uint128,
     };
     use kujira::query::{ExchangeRateResponse, KujiraQuery, OracleQuery};
     use std::collections::HashMap;
@@ -1536,5 +1549,286 @@ mod tests {
             res.attributes,
             vec![attr("action", "Withdraw from treasury pool")]
         )
+    }
+
+    #[test]
+    fn test_query_get_rounds() {
+        let mut deps = mock_dependencies_kujira();
+        let env = mock_env();
+        let info = mock_info(ADMIN1, &vec![]);
+
+        let msg = InstantiateMsg {
+            admins: vec![ADMIN1.to_string(), ADMIN2.to_string()],
+            asset_denom: ASSETDENOM.to_string(),
+            accepted_bet_denoms: vec![String::from(DENOM1), String::from(DENOM2)],
+        };
+
+        let _res = instantiate(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
+
+        let current_time = SystemTime::now();
+        let unix_timestamp = current_time
+            .duration_since(UNIX_EPOCH)
+            .expect("Failed to get UNIX timestamp")
+            .as_secs();
+
+        let six_minutes = Duration::from_secs(6 * 60); // 6 minutes in seconds
+        let new_timestamp = unix_timestamp + six_minutes.as_secs();
+
+        let msg = ExecuteMsg::CreateRound {
+            start_time: new_timestamp,
+            name: "Round1".to_string(),
+        };
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+
+        let msg = QueryMsg::GetRounds {};
+
+        let bin = query(deps.as_ref(), env.clone(), msg).unwrap();
+
+        let res: AllRoundsResponse = from_binary(&bin).unwrap();
+
+        let current_time = env.block.time.seconds();
+
+        let stop_time = new_timestamp + 300;
+        let round = Round {
+            created_at: current_time,
+            creator: info.sender,
+            start_time: new_timestamp,
+            stop_time,
+            participants_count: 0,
+            up_bets_count: 0,
+            down_bets_count: 0,
+            total_bet_amount: 0,
+            total_up_bet_amount: 0,
+            total_down_bet_amount: 0,
+            is_started: false,
+            started_at: None,
+            is_stopped: false,
+            stopped_at: None,
+            start_price: None,
+            stop_price: None,
+            bet_denoms: Vec::new(),
+        };
+
+        assert_eq!(res.rounds, vec![round]);
+    }
+
+    #[test]
+    fn test_query_get_round() {
+        let mut deps = mock_dependencies_kujira();
+        let env = mock_env();
+        let info = mock_info(ADMIN1, &vec![]);
+
+        let msg = InstantiateMsg {
+            admins: vec![ADMIN1.to_string(), ADMIN2.to_string()],
+            asset_denom: ASSETDENOM.to_string(),
+            accepted_bet_denoms: vec![String::from(DENOM1), String::from(DENOM2)],
+        };
+
+        let _res = instantiate(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
+
+        let current_time = SystemTime::now();
+        let unix_timestamp = current_time
+            .duration_since(UNIX_EPOCH)
+            .expect("Failed to get UNIX timestamp")
+            .as_secs();
+
+        let six_minutes = Duration::from_secs(6 * 60); // 6 minutes in seconds
+        let new_timestamp = unix_timestamp + six_minutes.as_secs();
+
+        let msg = ExecuteMsg::CreateRound {
+            start_time: new_timestamp,
+            name: "Round1".to_string(),
+        };
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+
+        let msg = QueryMsg::GetRound {
+            round_name: "Round1".to_string(),
+        };
+
+        let bin = query(deps.as_ref(), env.clone(), msg).unwrap();
+
+        let res: RoundResponse = from_binary(&bin).unwrap();
+
+        let current_time = env.block.time.seconds();
+
+        let stop_time = new_timestamp + 300;
+        let round = Round {
+            created_at: current_time,
+            creator: info.sender,
+            start_time: new_timestamp,
+            stop_time,
+            participants_count: 0,
+            up_bets_count: 0,
+            down_bets_count: 0,
+            total_bet_amount: 0,
+            total_up_bet_amount: 0,
+            total_down_bet_amount: 0,
+            is_started: false,
+            started_at: None,
+            is_stopped: false,
+            stopped_at: None,
+            start_price: None,
+            stop_price: None,
+            bet_denoms: Vec::new(),
+        };
+
+        assert_eq!(res.round, Some(round));
+    }
+
+    #[test]
+    fn test_query_user_bet() {
+        let mut deps = mock_dependencies_kujira();
+        let env = mock_env();
+        let info = mock_info(ADMIN1, &vec![]);
+
+        let msg = InstantiateMsg {
+            admins: vec![ADMIN1.to_string(), ADMIN2.to_string()],
+            asset_denom: ASSETDENOM.to_string(),
+            accepted_bet_denoms: vec![String::from(DENOM1), String::from(DENOM2)],
+        };
+
+        let _res = instantiate(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
+
+        let current_time = SystemTime::now();
+        let unix_timestamp = current_time
+            .duration_since(UNIX_EPOCH)
+            .expect("Failed to get UNIX timestamp")
+            .as_secs();
+
+        let six_minutes = Duration::from_secs(6 * 60); // 6 minutes in seconds
+        let new_timestamp = unix_timestamp + six_minutes.as_secs();
+
+        let msg = ExecuteMsg::CreateRound {
+            start_time: new_timestamp,
+            name: "Round1".to_string(),
+        };
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::PlaceBet {
+            side: Side::Up,
+            round_name: "Round1".to_string(),
+        };
+
+        let info = mock_info(
+            USER1,
+            &vec![Coin {
+                denom: DENOM1.to_string(),
+                amount: Uint128::from(1000u128),
+            }],
+        );
+
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+
+        let msg = QueryMsg::GetUserBet {
+            round_name: "Round1".to_string(),
+            user_addr: USER1.to_string(),
+        };
+
+        let bin = query(deps.as_ref(), env.clone(), msg).unwrap();
+
+        let res: UserBetResponse = from_binary(&bin).unwrap();
+        let current_time = env.block.time.seconds();
+        let new_bet = Bet {
+            side: Side::Up,
+            amount: 1000u128,
+            denom: DENOM1.to_string(),
+            win_claimed: false,
+            placed_at: current_time,
+        };
+
+        assert_eq!(res.bet, Some(new_bet));
+    }
+
+    #[test]
+    fn test_query_treasury_pool_denom() {
+        let mut deps = mock_dependencies_kujira();
+        let mut env = mock_env();
+        let info = mock_info(ADMIN1, &vec![]);
+
+        let msg = InstantiateMsg {
+            admins: vec![ADMIN1.to_string(), ADMIN2.to_string()],
+            asset_denom: ASSETDENOM.to_string(),
+            accepted_bet_denoms: vec![String::from(DENOM1), String::from(DENOM2)],
+        };
+
+        let _res = instantiate(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
+
+        let current_time = SystemTime::now();
+        let unix_timestamp = current_time
+            .duration_since(UNIX_EPOCH)
+            .expect("Failed to get UNIX timestamp")
+            .as_secs();
+
+        let six_minutes = Duration::from_secs(6 * 60); // 6 minutes in seconds
+        let new_timestamp = unix_timestamp + six_minutes.as_secs();
+
+        let msg = ExecuteMsg::CreateRound {
+            start_time: new_timestamp,
+            name: "Round1".to_string(),
+        };
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::PlaceBet {
+            side: Side::Up,
+            round_name: "Round1".to_string(),
+        };
+
+        let info = mock_info(
+            USER1,
+            &vec![Coin {
+                denom: DENOM1.to_string(),
+                amount: Uint128::from(100u128),
+            }],
+        );
+
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::StartRound {
+            name: "Round1".to_string(),
+        };
+
+        let info = mock_info(ADMIN1, &vec![]);
+
+        let _res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+
+        let msg = ExecuteMsg::StopRound {
+            name: "Round1".to_string(),
+        };
+
+        let mut querier: MockQuerier<KujiraQuery> = MockQuerier::new(&[]);
+        // update querier to have price change
+        querier = querier.with_custom_handler(|query: &KujiraQuery| match query {
+            KujiraQuery::Oracle(OracleQuery::ExchangeRate { denom: _ }) => {
+                let exchange_rate_response = ExchangeRateResponse {
+                    rate: Decimal::from_str("1.10").unwrap(),
+                };
+                SystemResult::Ok(ContractResult::Ok(
+                    to_binary(&exchange_rate_response).unwrap(),
+                ))
+            }
+            _ => unimplemented!(),
+        });
+        deps.querier = querier;
+
+        let twelve_minutes = Duration::from_secs(12 * 60); // 6 minutes in seconds
+        let stop_timestamp = unix_timestamp + twelve_minutes.as_secs();
+        env.block.time = Timestamp::from_seconds(stop_timestamp);
+
+        let _res = execute(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
+
+        let msg = QueryMsg::GetTreasuryPoolDenom {
+            denom: DENOM1.to_string(),
+        };
+
+        let bin = query(deps.as_ref(), env.clone(), msg).unwrap();
+
+        let res: TreasuryPoolDenomResponse = from_binary(&bin).unwrap();
+
+        let new_treasury_pool_denom = TreasuryPoolDenom {
+            amount: 15u128,
+            denom: DENOM1.to_string(),
+        };
+
+        assert_eq!(res.treasury_pool_denom, Some(new_treasury_pool_denom));
     }
 }

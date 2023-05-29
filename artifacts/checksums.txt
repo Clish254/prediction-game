@@ -1,1 +1,1 @@
-e5e4766ae82d3386b0a9613a55ff03baab316cbca7c0b63bb74710255b28806d  prediction_game.wasm
+daecc304a5f431c1e2e14121df10dbebca0849f88037b877df99dd2757cc4d82  prediction_game.wasm
