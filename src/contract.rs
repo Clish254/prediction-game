@@ -1,22 +1,22 @@
-#[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    to_binary, Addr, Api, BankMsg, Binary, Coin, CosmosMsg, Deps, DepsMut, Env, MessageInfo, Order,
-    Response, StdResult, Uint128,
+    to_binary, Addr, Api, BankMsg, Binary, Coin, CosmosMsg, Decimal, Deps, DepsMut, Env,
+    MessageInfo, Order, Response, StdResult, Uint128,
 };
 use cw2::set_contract_version;
+use cw_utils::{one_coin, NativeBalance};
 
 use crate::error::ContractError;
 use crate::msg::{
     AllRoundsResponse, ExecuteMsg, InstantiateMsg, QueryMsg, RoundResponse,
-    TreasuryPoolDenomResponse, UserBetResponse,
+    TreasuryBalanceResponse, UserBetResponse,
 };
 use crate::state::{
-    Bet, Config, Round, RoundDenomBet, Side, TreasuryPoolDenom, BET, CONFIG, ROUND, ROUNDDENOMBET,
-    TREASURYPOOLDENOM,
+    Bet, Config, Round, Side, TreasuryBalance, BET, CONFIG, ROUND, TREASURYBALANCE,
 };
 use kujira::querier::KujiraQuerier;
 use kujira::query::KujiraQuery;
+use std::str::FromStr;
 
 const CONTRACT_NAME: &str = "crates.io:prediction-game";
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -35,6 +35,10 @@ pub fn instantiate(
         accepted_bet_denoms: msg.accepted_bet_denoms,
     };
     CONFIG.save(deps.storage, &config)?;
+    let treasury_balance = TreasuryBalance {
+        balance: NativeBalance(vec![]),
+    };
+    TREASURYBALANCE.save(deps.storage, &treasury_balance)?;
     Ok(Response::new().add_attribute("action", "instantiate"))
 }
 
@@ -42,9 +46,8 @@ pub fn map_validate(api: &dyn Api, admins: &[String]) -> StdResult<Vec<Addr>> {
     admins.iter().map(|addr| api.addr_validate(addr)).collect()
 }
 
-pub fn sender_is_admin(deps: &DepsMut<KujiraQuery>, sender: &str) -> StdResult<bool> {
-    let cfg = CONFIG.load(deps.storage)?;
-    let can = cfg.is_admin(&sender);
+pub fn sender_is_admin(config: &Config, sender: &str) -> StdResult<bool> {
+    let can = config.is_admin(&sender);
     Ok(can)
 }
 
@@ -87,11 +90,11 @@ pub fn execute_update_admins(
     info: MessageInfo,
     admins: Vec<String>,
 ) -> Result<Response, ContractError> {
-    let is_admin = sender_is_admin(&deps, &info.sender.as_str())?;
+    let mut config = CONFIG.load(deps.storage)?;
+    let is_admin = sender_is_admin(&config, &info.sender.as_str())?;
     if !is_admin {
         return Err(ContractError::Unauthorized {});
     }
-    let mut config = CONFIG.load(deps.storage)?;
     let admins = map_validate(deps.api, &admins)?;
     config.admins = admins;
     CONFIG.save(deps.storage, &config)?;
@@ -104,11 +107,11 @@ pub fn execute_update_asset_denom(
     info: MessageInfo,
     asset_denom: String,
 ) -> Result<Response, ContractError> {
-    let is_admin = sender_is_admin(&deps, &info.sender.as_str())?;
+    let mut config = CONFIG.load(deps.storage)?;
+    let is_admin = sender_is_admin(&config, &info.sender.as_str())?;
     if !is_admin {
         return Err(ContractError::Unauthorized {});
     }
-    let mut config = CONFIG.load(deps.storage)?;
     config.asset_denom = asset_denom;
     CONFIG.save(deps.storage, &config)?;
     Ok(Response::new().add_attribute("action", "update asset denom"))
@@ -120,11 +123,11 @@ pub fn execute_update_accepted_bet_denoms(
     info: MessageInfo,
     accepted_bet_denoms: Vec<String>,
 ) -> Result<Response, ContractError> {
-    let is_admin = sender_is_admin(&deps, &info.sender.as_str())?;
+    let mut config = CONFIG.load(deps.storage)?;
+    let is_admin = sender_is_admin(&config, &info.sender.as_str())?;
     if !is_admin {
         return Err(ContractError::Unauthorized {});
     }
-    let mut config = CONFIG.load(deps.storage)?;
     config.accepted_bet_denoms = accepted_bet_denoms;
     CONFIG.save(deps.storage, &config)?;
     Ok(Response::new().add_attribute("action", "update accepted bet denoms"))
@@ -161,16 +164,15 @@ pub fn execute_create_round(
                 participants_count: 0,
                 up_bets_count: 0,
                 down_bets_count: 0,
-                total_bet_amount: 0,
-                total_up_bet_amount: 0,
-                total_down_bet_amount: 0,
+                total_bet_amount: NativeBalance(vec![]),
+                total_up_bet_amount: NativeBalance(vec![]),
+                total_down_bet_amount: NativeBalance(vec![]),
                 is_started: false,
                 started_at: None,
                 is_stopped: false,
                 stopped_at: None,
                 start_price: None,
                 stop_price: None,
-                bet_denoms: Vec::new(),
             };
             ROUND.save(deps.storage, name, &new_round)?;
         }
@@ -186,32 +188,27 @@ pub fn execute_start_round(
     env: Env,
     name: String,
 ) -> Result<Response, ContractError> {
-    let is_admin = sender_is_admin(&deps, &info.sender.as_str())?;
+    let config = CONFIG.load(deps.storage)?;
+    let is_admin = sender_is_admin(&config, &info.sender.as_str())?;
     if !is_admin {
         return Err(ContractError::Unauthorized {});
     }
-    let existing_round = ROUND.may_load(deps.storage, name.clone())?;
-    match existing_round {
-        Some(round) => {
-            if round.is_started {
-                return Err(ContractError::RoundAlreadyStarted {});
-            }
-            let current_time = env.block.time.seconds();
-            if current_time > round.stop_time {
-                return Err(ContractError::RoundStopTimePassed {});
-            }
-            let config = CONFIG.load(deps.storage)?;
-            let q = KujiraQuerier::new(&deps.querier);
-            let res = q.query_exchange_rate(config.asset_denom)?;
-            let price = res.rate;
-            let mut started_round = round;
-            started_round.is_started = true;
-            started_round.started_at = Some(current_time);
-            started_round.start_price = Some(price);
-            ROUND.save(deps.storage, name, &started_round)?;
-        }
-        None => return Err(ContractError::RoundDoesNotExist {}),
+    let round = ROUND.load(deps.storage, name.clone())?;
+    if round.is_started {
+        return Err(ContractError::RoundAlreadyStarted {});
     }
+    let current_time = env.block.time.seconds();
+    if current_time > round.stop_time {
+        return Err(ContractError::RoundStopTimePassed {});
+    }
+    let q = KujiraQuerier::new(&deps.querier);
+    let res = q.query_exchange_rate(config.asset_denom)?;
+    let price = res.rate;
+    let mut started_round = round;
+    started_round.is_started = true;
+    started_round.started_at = Some(current_time);
+    started_round.start_price = Some(price);
+    ROUND.save(deps.storage, name, &started_round)?;
     Ok(Response::new().add_attribute("action", "Start round"))
 }
 
@@ -225,15 +222,8 @@ pub fn execute_place_bet(
     round_name: String,
 ) -> Result<Response, ContractError> {
     let config = CONFIG.load(deps.storage)?;
-    let funds_len = info.funds.len();
 
-    if funds_len < 1 {
-        return Err(ContractError::NoCoinsSent {});
-    }
-    if funds_len > 1 {
-        return Err(ContractError::TooManyCoins {});
-    }
-    let coin = &info.funds[0];
+    let coin = one_coin(&info)?;
 
     let denom_accepted = config.accepted_bet_denoms.contains(&coin.denom);
 
@@ -241,81 +231,44 @@ pub fn execute_place_bet(
         return Err(ContractError::DenomNotSupported {});
     }
 
-    let existing_round = ROUND.may_load(deps.storage, round_name.clone())?;
-    match existing_round {
-        Some(round) => {
-            let current_time = env.block.time.seconds();
-            if round.start_time < current_time && round.is_started {
-                return Err(ContractError::RoundAlreadyStarted {});
-            }
-            let coin = &info.funds[0];
-            let sent_amount = coin.amount.u128();
-            let existing_bet =
-                BET.may_load(deps.storage, (round_name.clone(), info.sender.clone()))?;
-            match existing_bet {
-                Some(_bet) => return Err(ContractError::BetAlreadyPlaced {}),
-                None => {
-                    let new_bet = Bet {
-                        side: side.clone(),
-                        amount: sent_amount,
-                        denom: coin.denom.clone(),
-                        win_claimed: false,
-                        placed_at: current_time,
-                    };
-                    BET.save(
-                        deps.storage,
-                        (round_name.clone(), info.sender.clone()),
-                        &new_bet,
-                    )?;
-                    let bet_denom_in_previous_bets = round.bet_denoms.contains(&coin.denom);
-                    let mut updated_round = round.clone();
-                    let bet_denom = coin.denom.clone();
-                    if !bet_denom_in_previous_bets {
-                        let mut existing_bet_denoms = round.bet_denoms;
-                        existing_bet_denoms.push(bet_denom);
-                        updated_round.bet_denoms = existing_bet_denoms;
-                    }
-                    match side {
-                        Side::Up => {
-                            updated_round.up_bets_count += 1;
-                            updated_round.total_up_bet_amount += sent_amount;
-                        }
-                        Side::Down => {
-                            updated_round.down_bets_count += 1;
-                            updated_round.total_down_bet_amount += sent_amount;
-                        }
-                    }
-                    let existing_round_denom_bet = ROUNDDENOMBET
-                        .may_load(deps.storage, (round_name.clone(), coin.denom.clone()))?;
-                    match existing_round_denom_bet {
-                        Some(round_denom_bet) => {
-                            let mut updated_round_denom_bet = round_denom_bet;
-                            updated_round_denom_bet.amount += sent_amount;
-                            ROUNDDENOMBET.save(
-                                deps.storage,
-                                (round_name.clone(), coin.denom.clone()),
-                                &updated_round_denom_bet,
-                            )?;
-                        }
-                        None => {
-                            let new_round_denom_bet = RoundDenomBet {
-                                amount: sent_amount,
-                            };
-                            ROUNDDENOMBET.save(
-                                deps.storage,
-                                (round_name.clone(), coin.denom.clone()),
-                                &new_round_denom_bet,
-                            )?;
-                        }
-                    }
-
-                    updated_round.total_bet_amount += sent_amount;
-                    updated_round.participants_count += 1;
-                    ROUND.save(deps.storage, round_name, &updated_round)?;
+    let round = ROUND.load(deps.storage, round_name.clone())?;
+    let current_time = env.block.time.seconds();
+    if round.start_time < current_time && round.is_started {
+        return Err(ContractError::RoundAlreadyStarted {});
+    }
+    let sent_amount = coin.amount.u128();
+    let existing_bet = BET.may_load(deps.storage, (round_name.clone(), info.sender.clone()))?;
+    match existing_bet {
+        Some(_bet) => return Err(ContractError::BetAlreadyPlaced {}),
+        None => {
+            let new_bet = Bet {
+                side: side.clone(),
+                amount: sent_amount,
+                denom: coin.denom.clone(),
+                win_claimed: false,
+                placed_at: current_time,
+            };
+            BET.save(
+                deps.storage,
+                (round_name.clone(), info.sender.clone()),
+                &new_bet,
+            )?;
+            let mut updated_round = round.clone();
+            match side {
+                Side::Up => {
+                    updated_round.up_bets_count += 1;
+                    updated_round.total_up_bet_amount += coin.clone();
+                }
+                Side::Down => {
+                    updated_round.down_bets_count += 1;
+                    updated_round.total_down_bet_amount += coin.clone();
                 }
             }
+
+            updated_round.total_bet_amount += coin;
+            updated_round.participants_count += 1;
+            ROUND.save(deps.storage, round_name, &updated_round)?;
         }
-        None => return Err(ContractError::RoundDoesNotExist {}),
     }
     Ok(Response::new().add_attribute("action", "place bet"))
 }
@@ -326,65 +279,42 @@ pub fn execute_withdraw_bet(
     env: Env,
     round_name: String,
 ) -> Result<Response, ContractError> {
-    let existing_round = ROUND.may_load(deps.storage, round_name.clone())?;
+    let round = ROUND.load(deps.storage, round_name.clone())?;
     let withdraw_message: CosmosMsg;
-    match existing_round {
-        Some(round) => {
-            let current_time = env.block.time.seconds();
-            if round.start_time < current_time || round.is_started {
-                return Err(ContractError::RoundAlreadyStarted {});
-            }
-            let existing_bet =
-                BET.may_load(deps.storage, (round_name.clone(), info.sender.clone()))?;
-
-            match existing_bet {
-                Some(bet) => {
-                    let bet_coin = Coin {
-                        denom: bet.denom.clone(),
-                        amount: Uint128::from(bet.amount),
-                    };
-
-                    withdraw_message = CosmosMsg::Bank(BankMsg::Send {
-                        to_address: info.sender.to_string(),
-                        amount: vec![bet_coin],
-                    });
-                    let mut updated_round = round;
-                    match bet.side {
-                        Side::Up => {
-                            updated_round.up_bets_count -= 1;
-                            updated_round.total_up_bet_amount -= bet.amount;
-                        }
-                        Side::Down => {
-                            updated_round.down_bets_count -= 1;
-                            updated_round.total_down_bet_amount -= bet.amount;
-                        }
-                    }
-
-                    updated_round.total_bet_amount -= bet.amount;
-                    updated_round.participants_count -= 1;
-                    ROUND.save(deps.storage, round_name.clone(), &updated_round)?;
-
-                    let existing_round_denom_bet = ROUNDDENOMBET
-                        .may_load(deps.storage, (round_name.clone(), bet.denom.clone()))?;
-                    match existing_round_denom_bet {
-                        Some(round_denom_bet) => {
-                            let mut updated_round_denom_bet = round_denom_bet;
-                            updated_round_denom_bet.amount -= bet.amount;
-                            ROUNDDENOMBET.save(
-                                deps.storage,
-                                (round_name.clone(), bet.denom),
-                                &updated_round_denom_bet,
-                            )?;
-                        }
-                        None => {}
-                    }
-                    BET.remove(deps.storage, (round_name, info.sender))
-                }
-                None => return Err(ContractError::BetNotFound {}),
-            }
-        }
-        None => return Err(ContractError::RoundDoesNotExist {}),
+    let current_time = env.block.time.seconds();
+    if round.start_time < current_time || round.is_started {
+        return Err(ContractError::RoundAlreadyStarted {});
     }
+    let bet = BET.load(deps.storage, (round_name.clone(), info.sender.clone()))?;
+
+    let bet_coin = Coin {
+        denom: bet.denom.clone(),
+        amount: Uint128::from(bet.amount),
+    };
+
+    withdraw_message = CosmosMsg::Bank(BankMsg::Send {
+        to_address: info.sender.to_string(),
+        amount: vec![bet_coin.clone()],
+    });
+    let mut updated_round = round;
+    match bet.side {
+        Side::Up => {
+            updated_round.up_bets_count -= 1;
+            updated_round.total_up_bet_amount =
+                (updated_round.total_up_bet_amount - bet_coin.clone()).unwrap();
+        }
+        Side::Down => {
+            updated_round.down_bets_count -= 1;
+            updated_round.total_down_bet_amount =
+                (updated_round.total_down_bet_amount - bet_coin.clone()).unwrap();
+        }
+    }
+
+    updated_round.total_bet_amount = (updated_round.total_bet_amount - bet_coin).unwrap();
+    updated_round.participants_count -= 1;
+    ROUND.save(deps.storage, round_name.clone(), &updated_round)?;
+
+    BET.remove(deps.storage, (round_name, info.sender));
     Ok(Response::new()
         .add_attribute("action", "withdraw bet")
         .add_message(withdraw_message))
@@ -398,76 +328,41 @@ pub fn execute_stop_round(
     env: Env,
     name: String,
 ) -> Result<Response, ContractError> {
-    let is_admin = sender_is_admin(&deps, &info.sender.as_str())?;
+    let config = CONFIG.load(deps.storage)?;
+    let is_admin = sender_is_admin(&config, &info.sender.as_str())?;
     if !is_admin {
         return Err(ContractError::Unauthorized {});
     }
-    let existing_round = ROUND.may_load(deps.storage, name.clone())?;
-    match existing_round {
-        Some(round) => {
-            if round.is_stopped {
-                return Err(ContractError::RoundAlreadyEnded {});
-            }
-            let current_time = env.block.time.seconds();
-            if current_time < round.stop_time {
-                return Err(ContractError::RoundStillInProgress {});
-            }
-            let config = CONFIG.load(deps.storage)?;
-            let q = KujiraQuerier::new(&deps.querier);
-            let res = q.query_exchange_rate(config.asset_denom)?;
-            let price = res.rate;
-            let mut stopped_round = round.clone();
-            stopped_round.is_stopped = true;
-            stopped_round.stopped_at = Some(current_time);
-            stopped_round.stop_price = Some(price);
-            ROUND.save(deps.storage, name.clone(), &stopped_round)?;
-            // if the price changed, take fees
-            if round.start_price.unwrap() != price {
-                // update the treasury pool amount for each denom used to bet in the round
-                for denom in round.bet_denoms.clone() {
-                    let existing_round_denom_bet =
-                        ROUNDDENOMBET.may_load(deps.storage, (name.clone(), denom.clone()))?;
-                    println!("denoms {:?}", denom.clone());
-                    match existing_round_denom_bet {
-                        Some(round_denom_bet) => {
-                            let treasury_share = round_denom_bet.amount * 15 / 100;
+    let round = ROUND.load(deps.storage, name.clone())?;
+    if round.is_stopped {
+        return Err(ContractError::RoundAlreadyEnded {});
+    }
+    let current_time = env.block.time.seconds();
+    if current_time < round.stop_time {
+        return Err(ContractError::RoundStillInProgress {});
+    }
+    let q = KujiraQuerier::new(&deps.querier);
+    let res = q.query_exchange_rate(config.asset_denom)?;
+    let price = res.rate;
+    let mut stopped_round = round.clone();
+    stopped_round.is_stopped = true;
+    stopped_round.stopped_at = Some(current_time);
+    stopped_round.stop_price = Some(price);
+    ROUND.save(deps.storage, name.clone(), &stopped_round)?;
+    // if the price changed, take fees
+    if round.start_price.unwrap() != price {
+        // update the treasury pool amount for each denom used to bet in the round
+        for coin in round.total_bet_amount.into_vec() {
+            let treasury_share = coin.amount.u128() * 15 / 100;
 
-                            println!("{}", treasury_share);
-                            let existing_treasury_pool_denom =
-                                TREASURYPOOLDENOM.may_load(deps.storage, denom.clone())?;
-                            println!("existing denom{:?}", existing_treasury_pool_denom.clone());
-                            match existing_treasury_pool_denom {
-                                Some(treasury_pool_denom) => {
-                                    println!("existing {:?}", treasury_pool_denom.clone());
-                                    let mut updated_treasury_pool_denom = treasury_pool_denom;
-                                    updated_treasury_pool_denom.amount += treasury_share;
-                                    TREASURYPOOLDENOM.save(
-                                        deps.storage,
-                                        denom,
-                                        &updated_treasury_pool_denom,
-                                    )?;
-                                }
-                                None => {
-                                    let new_treasury_pool_denom = TreasuryPoolDenom {
-                                        amount: treasury_share,
-                                        denom: denom.clone(),
-                                    };
-
-                                    println!("new {:?}", new_treasury_pool_denom);
-                                    TREASURYPOOLDENOM.save(
-                                        deps.storage,
-                                        denom,
-                                        &new_treasury_pool_denom,
-                                    )?
-                                }
-                            }
-                        }
-                        None => continue,
-                    }
-                }
-            }
+            let mut treasury_balance = TREASURYBALANCE.load(deps.storage)?;
+            let new_coin = Coin {
+                denom: coin.denom,
+                amount: Uint128::from(treasury_share),
+            };
+            treasury_balance.balance += new_coin;
+            TREASURYBALANCE.save(deps.storage, &treasury_balance)?;
         }
-        None => return Err(ContractError::RoundDoesNotExist {}),
     }
     Ok(Response::new().add_attribute("action", "Stop round"))
 }
@@ -481,101 +376,89 @@ pub fn execute_claim_win(
     _env: Env,
     round_name: String,
 ) -> Result<Response, ContractError> {
-    let existing_round = ROUND.may_load(deps.storage, round_name.clone())?;
+    let round = ROUND.load(deps.storage, round_name.clone())?;
     let mut messages: Vec<CosmosMsg> = Vec::new();
-    match existing_round {
-        Some(round) => {
-            if !round.is_stopped {
-                return Err(ContractError::RoundStillInProgress {});
-            }
+    if !round.is_stopped {
+        return Err(ContractError::RoundStillInProgress {});
+    }
 
-            let existing_bet =
-                BET.may_load(deps.storage, (round_name.clone(), info.sender.clone()))?;
-            let start_price = round.start_price.unwrap();
-            let stop_price = round.stop_price.unwrap();
-            match existing_bet {
-                Some(bet) => {
-                    let mut is_winner = false;
-                    match bet.side {
-                        Side::Up => {
-                            if stop_price > start_price {
-                                is_winner = true
-                            }
-                        }
-                        Side::Down => {
-                            if stop_price < start_price {
-                                is_winner = true
-                            }
-                        }
-                    }
-                    let mut sender_coins: Vec<Coin> = Vec::new();
-                    if is_winner {
-                        if bet.win_claimed {
-                            return Err(ContractError::WinAlreadyClaimed {});
-                        }
-                        // sharable amount is 85% of the bets, 15% goes to fees wallet
-                        let sharable_amount = 85 / 100 * round.total_bet_amount;
-                        if round.participants_count == 1 {
-                            // if the sender was the only participant he gets 20% of bet
-                            // amount back if he wins
-                            let win_amount = 20 / 100 * bet.amount;
-                            let sender_coin = Coin {
-                                denom: bet.denom.clone(),
-                                amount: Uint128::from(win_amount),
-                            };
-                            sender_coins.push(sender_coin);
-                        } else {
-                            let senders_share = bet.amount / sharable_amount;
-                            for denom in round.bet_denoms.clone() {
-                                let existing_round_denom_bet = ROUNDDENOMBET
-                                    .may_load(deps.storage, (round_name.clone(), denom.clone()))?;
-                                match existing_round_denom_bet {
-                                    Some(round_denom_bet) => {
-                                        let denom_win_amount =
-                                            senders_share * round_denom_bet.amount;
-                                        let sender_coin = Coin {
-                                            denom: denom.clone(),
-                                            amount: Uint128::from(denom_win_amount),
-                                        };
-                                        sender_coins.push(sender_coin);
-                                    }
-                                    None => continue,
-                                }
-                            }
-                        }
-
-                        let sender_wins_msg = CosmosMsg::Bank(BankMsg::Send {
-                            to_address: info.sender.to_string(),
-                            amount: sender_coins,
-                        });
-
-                        messages.push(sender_wins_msg);
-                        let mut updated_bet = bet;
-                        updated_bet.win_claimed = true;
-                        BET.save(
-                            deps.storage,
-                            (round_name.clone(), info.sender),
-                            &updated_bet,
-                        )?;
-                    } else if start_price == stop_price {
-                        let sender_coin = Coin {
-                            denom: bet.denom.clone(),
-                            amount: Uint128::from(bet.amount),
-                        };
-                        sender_coins.push(sender_coin);
-                        let prices_equal_msg = CosmosMsg::Bank(BankMsg::Send {
-                            to_address: info.sender.to_string(),
-                            amount: sender_coins,
-                        });
-                        messages.push(prices_equal_msg)
-                    } else {
-                        return Err(ContractError::YouLost {});
-                    }
-                }
-                None => return Err(ContractError::BetNotFound {}),
+    let bet = BET.load(deps.storage, (round_name.clone(), info.sender.clone()))?;
+    let start_price = round.start_price.unwrap();
+    let stop_price = round.stop_price.unwrap();
+    let mut is_winner = false;
+    match bet.side {
+        Side::Up => {
+            if stop_price > start_price {
+                is_winner = true
             }
         }
-        None => return Err(ContractError::RoundDoesNotExist {}),
+        Side::Down => {
+            if stop_price < start_price {
+                is_winner = true
+            }
+        }
+    }
+    let mut sender_coins: Vec<Coin> = Vec::new();
+    if is_winner {
+        if bet.win_claimed {
+            return Err(ContractError::WinAlreadyClaimed {});
+        }
+        // give the winner a share of all denoms which were used to bet
+        for coin in round.total_bet_amount.into_vec() {
+            let q = KujiraQuerier::new(&deps.querier);
+            let res = q.query_exchange_rate(coin.denom.to_string())?;
+            let total_amount_in_usd =
+                res.rate * Decimal::from_str(&coin.amount.u128().to_string())?;
+            // sharable amount is 85% of the bets, 15% goes to fees wallet
+            let numerator = Uint128::from(85u128) * total_amount_in_usd;
+            let sharable_amount = numerator.checked_div(Uint128::from(100u128)).unwrap();
+            if round.participants_count == 1 {
+                // if the sender was the only participant he gets 20% of bet
+                // amount back if he wins
+                let win_amount = 20 / 100 * bet.amount;
+                let sender_coin = Coin {
+                    denom: bet.denom.clone(),
+                    amount: Uint128::from(win_amount),
+                };
+                sender_coins.push(sender_coin);
+            } else {
+                let res = q.query_exchange_rate(bet.denom.to_string())?;
+                let user_bet_amount_in_usd = res.rate * Uint128::from(bet.amount);
+                let senders_share = user_bet_amount_in_usd / sharable_amount;
+                let denom_win_amount = senders_share.u128() * bet.amount;
+                let sender_coin = Coin {
+                    denom: coin.denom,
+                    amount: Uint128::from(denom_win_amount),
+                };
+                sender_coins.push(sender_coin);
+            }
+        }
+        let sender_wins_msg = CosmosMsg::Bank(BankMsg::Send {
+            to_address: info.sender.to_string(),
+            amount: sender_coins,
+        });
+
+        messages.push(sender_wins_msg);
+        let mut updated_bet = bet;
+        updated_bet.win_claimed = true;
+        BET.save(
+            deps.storage,
+            (round_name.clone(), info.sender),
+            &updated_bet,
+        )?;
+    } else if start_price == stop_price {
+        let sender_coin = Coin {
+            denom: bet.denom.clone(),
+            amount: Uint128::from(bet.amount),
+        };
+        sender_coins.push(sender_coin);
+        let prices_equal_msg = CosmosMsg::Bank(BankMsg::Send {
+            to_address: info.sender.to_string(),
+            amount: sender_coins,
+        });
+        messages.push(prices_equal_msg)
+    } else {
+        return Err(ContractError::YouLost {});
     }
     Ok(Response::new()
         .add_attribute("action", "claim win")
@@ -591,28 +474,28 @@ pub fn execute_withdraw_from_treasury_pool(
     to_address: String,
     amount: u128,
 ) -> Result<Response, ContractError> {
-    let is_admin = sender_is_admin(&deps, &info.sender.as_str())?;
+    let config = CONFIG.load(deps.storage)?;
+    let is_admin = sender_is_admin(&config, &info.sender.as_str())?;
     if !is_admin {
         return Err(ContractError::Unauthorized {});
     }
-    let existing_treasury_pool_denom = TREASURYPOOLDENOM.may_load(deps.storage, denom.clone())?;
+    let mut treasury_balance = TREASURYBALANCE.load(deps.storage)?;
     let message: CosmosMsg;
-    match existing_treasury_pool_denom {
-        Some(treasury_pool_denom) => {
-            if treasury_pool_denom.amount < amount {
-                return Err(ContractError::InsufficientTreasuryDenomBalance {});
-            }
-            let coin = Coin {
-                denom,
-                amount: Uint128::from(amount),
-            };
-            message = CosmosMsg::Bank(BankMsg::Send {
-                to_address,
-                amount: vec![coin],
-            });
-        }
-        None => return Err(ContractError::TreasuryDenomDoesNotExist {}),
-    }
+
+    let coin = Coin {
+        denom,
+        amount: Uint128::from(amount),
+    };
+    let new_balance = match treasury_balance.balance - coin.clone() {
+        Ok(balance) => balance,
+        Err(_) => return Err(ContractError::InsufficientTreasuryBalance {}),
+    };
+    message = CosmosMsg::Bank(BankMsg::Send {
+        to_address,
+        amount: vec![coin],
+    });
+    treasury_balance.balance = new_balance;
+    TREASURYBALANCE.save(deps.storage, &treasury_balance)?;
     Ok(Response::new()
         .add_attribute("action", "Withdraw from treasury pool")
         .add_message(message))
@@ -623,7 +506,7 @@ pub fn query(deps: Deps<KujiraQuery>, env: Env, msg: QueryMsg) -> StdResult<Bina
     match msg {
         QueryMsg::GetRounds {} => query_all_rounds(deps, env),
         QueryMsg::GetRound { round_name } => query_round(deps, env, round_name),
-        QueryMsg::GetTreasuryPoolDenom { denom } => query_treasury_pool_denom(deps, env, denom),
+        QueryMsg::GetTreasuryBalance {} => query_treasury_balance(deps, env),
         QueryMsg::GetUserBet {
             round_name,
             user_addr,
@@ -641,15 +524,9 @@ pub fn query_all_rounds(deps: Deps<KujiraQuery>, _env: Env) -> StdResult<Binary>
 }
 
 // gets single treasury pool denom
-pub fn query_treasury_pool_denom(
-    deps: Deps<KujiraQuery>,
-    _env: Env,
-    denom: String,
-) -> StdResult<Binary> {
-    let treasury_pool_denom = TREASURYPOOLDENOM.may_load(deps.storage, denom)?;
-    to_binary(&TreasuryPoolDenomResponse {
-        treasury_pool_denom,
-    })
+pub fn query_treasury_balance(deps: Deps<KujiraQuery>, _env: Env) -> StdResult<Binary> {
+    let treasury_balance = TREASURYBALANCE.may_load(deps.storage)?;
+    to_binary(&TreasuryBalanceResponse { treasury_balance })
 }
 
 // gets single round by name
@@ -676,17 +553,18 @@ mod tests {
     use crate::contract::{execute, instantiate, query};
     use crate::msg::{
         AllRoundsResponse, ExecuteMsg, InstantiateMsg, QueryMsg, RoundResponse,
-        TreasuryPoolDenomResponse, UserBetResponse,
+        TreasuryBalanceResponse, UserBetResponse,
     };
-    use crate::state::{Bet, Round, Side, TreasuryPoolDenom};
+    use crate::state::{Bet, Round, Side, TreasuryBalance};
     use crate::ContractError;
     use core::cell::RefCell;
     use core::marker::PhantomData;
     use cosmwasm_std::testing::{mock_env, mock_info, MockApi, MockQuerier, MockStorage};
     use cosmwasm_std::{
-        attr, from_binary, to_binary, Coin, ContractResult, Decimal, OwnedDeps, SystemResult,
-        Timestamp, Uint128,
+        attr, from_binary, to_binary, Coin, ContractResult, Decimal, OwnedDeps, StdError,
+        SystemResult, Timestamp, Uint128,
     };
+    use cw_utils::NativeBalance;
     use kujira::query::{ExchangeRateResponse, KujiraQuery, OracleQuery};
     use std::collections::HashMap;
 
@@ -1384,7 +1262,10 @@ mod tests {
 
         let err = execute(deps.as_mut(), env, info.clone(), msg).unwrap_err();
 
-        assert!(matches!(err, ContractError::BetNotFound {}))
+        assert!(matches!(
+            err,
+            ContractError::Std(StdError::NotFound { kind: _ })
+        ))
     }
 
     #[test]
@@ -1457,7 +1338,7 @@ mod tests {
 
         let err = execute(deps.as_mut(), env.clone(), info.clone(), msg).unwrap_err();
 
-        assert!(matches!(err, ContractError::TreasuryDenomDoesNotExist {}))
+        assert!(matches!(err, ContractError::InsufficientTreasuryBalance {}))
     }
 
     #[test]
@@ -1597,16 +1478,15 @@ mod tests {
             participants_count: 0,
             up_bets_count: 0,
             down_bets_count: 0,
-            total_bet_amount: 0,
-            total_up_bet_amount: 0,
-            total_down_bet_amount: 0,
+            total_bet_amount: NativeBalance(vec![]),
+            total_up_bet_amount: NativeBalance(vec![]),
+            total_down_bet_amount: NativeBalance(vec![]),
             is_started: false,
             started_at: None,
             is_stopped: false,
             stopped_at: None,
             start_price: None,
             stop_price: None,
-            bet_denoms: Vec::new(),
         };
 
         assert_eq!(res.rounds, vec![round]);
@@ -1660,16 +1540,15 @@ mod tests {
             participants_count: 0,
             up_bets_count: 0,
             down_bets_count: 0,
-            total_bet_amount: 0,
-            total_up_bet_amount: 0,
-            total_down_bet_amount: 0,
+            total_bet_amount: NativeBalance(vec![]),
+            total_up_bet_amount: NativeBalance(vec![]),
+            total_down_bet_amount: NativeBalance(vec![]),
             is_started: false,
             started_at: None,
             is_stopped: false,
             stopped_at: None,
             start_price: None,
             stop_price: None,
-            bet_denoms: Vec::new(),
         };
 
         assert_eq!(res.round, Some(round));
@@ -1740,7 +1619,7 @@ mod tests {
     }
 
     #[test]
-    fn test_query_treasury_pool_denom() {
+    fn test_query_treasury_pool_balance() {
         let mut deps = mock_dependencies_kujira();
         let mut env = mock_env();
         let info = mock_info(ADMIN1, &vec![]);
@@ -1816,19 +1695,19 @@ mod tests {
 
         let _res = execute(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
 
-        let msg = QueryMsg::GetTreasuryPoolDenom {
-            denom: DENOM1.to_string(),
-        };
+        let msg = QueryMsg::GetTreasuryBalance {};
 
         let bin = query(deps.as_ref(), env.clone(), msg).unwrap();
 
-        let res: TreasuryPoolDenomResponse = from_binary(&bin).unwrap();
+        let res: TreasuryBalanceResponse = from_binary(&bin).unwrap();
 
-        let new_treasury_pool_denom = TreasuryPoolDenom {
-            amount: 15u128,
-            denom: DENOM1.to_string(),
+        let new_treasury_balance = TreasuryBalance {
+            balance: NativeBalance(vec![Coin {
+                amount: Uint128::from(15u128),
+                denom: DENOM1.to_string(),
+            }]),
         };
 
-        assert_eq!(res.treasury_pool_denom, Some(new_treasury_pool_denom));
+        assert_eq!(res.treasury_balance, Some(new_treasury_balance));
     }
 }

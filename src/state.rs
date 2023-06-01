@@ -1,3 +1,4 @@
+use cw_utils::NativeBalance;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -41,12 +42,11 @@ pub struct Round {
     pub start_time: u64,
     pub stop_time: u64,
     pub participants_count: u128,
-    pub bet_denoms: Vec<String>,
     pub up_bets_count: u128,
     pub down_bets_count: u128,
-    pub total_bet_amount: u128,
-    pub total_up_bet_amount: u128,
-    pub total_down_bet_amount: u128,
+    pub total_bet_amount: NativeBalance,
+    pub total_up_bet_amount: NativeBalance,
+    pub total_down_bet_amount: NativeBalance,
     pub start_price: Option<Decimal>,
     pub stop_price: Option<Decimal>,
 }
@@ -68,23 +68,10 @@ pub struct Bet {
 // Addr is the address of the user who is betting
 pub const BET: Map<(String, Addr), Bet> = Map::new("bet");
 
-// this stores the total amount of a particular denom that has been used to bet on a particular round
+// this is stores the total amount that has been collected in fees
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
-pub struct RoundDenomBet {
-    pub amount: u128,
+pub struct TreasuryBalance {
+    pub balance: NativeBalance,
 }
 
-// first string here is the name of the round the user is betting on
-// second string is the denom used to bet in the round
-pub const ROUNDDENOMBET: Map<(String, String), RoundDenomBet> = Map::new("rounddenombet");
-
-// this is stores the total amount of a given denom that has been collected in fees and is
-// yet to be withdrawn
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
-pub struct TreasuryPoolDenom {
-    pub amount: u128,
-    pub denom: String,
-}
-
-// string here is the address of the denom availabe in the treasury balance
-pub const TREASURYPOOLDENOM: Map<String, TreasuryPoolDenom> = Map::new("rounddenombet");
+pub const TREASURYBALANCE: Item<TreasuryBalance> = Item::new("treasurybalance");

@@ -1,7 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::state::{Bet, Round, Side, TreasuryPoolDenom};
+use crate::state::{Bet, Round, Side, TreasuryBalance};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -54,9 +54,7 @@ pub enum ExecuteMsg {
 #[serde(rename_all = "snake_case")]
 pub enum QueryMsg {
     GetRounds {},
-    GetTreasuryPoolDenom {
-        denom: String,
-    },
+    GetTreasuryBalance {},
     GetRound {
         round_name: String,
     },
@@ -72,8 +70,8 @@ pub struct AllRoundsResponse {
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, JsonSchema, Debug)]
-pub struct TreasuryPoolDenomResponse {
-    pub treasury_pool_denom: Option<TreasuryPoolDenom>,
+pub struct TreasuryBalanceResponse {
+    pub treasury_balance: Option<TreasuryBalance>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, JsonSchema, Debug)]

@@ -1,6 +1,8 @@
 use cosmwasm_std::StdError;
 use thiserror::Error;
 
+use cw_utils::PaymentError;
+
 #[derive(Error, Debug)]
 pub enum ContractError {
     #[error("{0}")]
@@ -8,6 +10,9 @@ pub enum ContractError {
 
     #[error("Custom Error val: {val:?}")]
     CustomError { val: String },
+
+    #[error("{0}")]
+    Payment(#[from] PaymentError),
 
     #[error("Invalid start time message: {message:?}")]
     InvalidStartTime { message: String },
@@ -66,9 +71,6 @@ pub enum ContractError {
     #[error("You cannot claim win from the provided round because you lost")]
     YouLost {},
 
-    #[error("There is insufficient balance in treasury pool to withdraw the required amount")]
-    InsufficientTreasuryDenomBalance {},
-
-    #[error("The provided denom does not exist in the treasury pool")]
-    TreasuryDenomDoesNotExist {},
+    #[error("There is insufficient balance in treasury to withdraw the required amount")]
+    InsufficientTreasuryBalance {},
 }
